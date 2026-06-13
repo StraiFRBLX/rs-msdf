@@ -1,4 +1,6 @@
 use assert_cmd::Command;
+use base64::Engine;
+use serde_json::Value;
 use tempfile::tempdir;
 
 const SIMPLE_SVG: &str = r#"
@@ -33,6 +35,91 @@ fn cli_writes_png_and_metadata() {
     let metadata = std::fs::read_to_string(json_path).unwrap();
     assert!(metadata.contains("\"format\": \"msdf-rgb8\""));
     assert!(metadata.contains("\"width\": 16"));
+}
+
+#[test]
+fn cli_writes_self_contained_json_export() {
+    let temp = tempdir().unwrap();
+    let svg_path = temp.path().join("icon.svg");
+    let json_path = temp.path().join("icon.msdf.json");
+    std::fs::write(&svg_path, SIMPLE_SVG).unwrap();
+
+    Command::cargo_bin("rs-msdf")
+        .unwrap()
+        .arg(&svg_path)
+        .arg("--size")
+        .arg("16")
+        .arg("--output")
+        .arg(&json_path)
+        .assert()
+        .success();
+
+    assert!(json_path.exists());
+
+    let export: Value = serde_json::from_slice(&std::fs::read(json_path).unwrap()).unwrap();
+    assert_eq!(export["kind"], "rs-msdf");
+    assert_eq!(export["version"], 1);
+    assert_eq!(export["format"], "msdf-rgb8");
+    assert_eq!(export["encoding"], "base64");
+    assert_eq!(export["channels"], "rgb");
+    assert_eq!(export["bytes_per_pixel"], 3);
+    assert_eq!(export["width"], 16);
+    assert_eq!(export["height"], 16);
+
+    let data_len = export["data_len"].as_u64().unwrap() as usize;
+    assert_eq!(data_len, 16 * 16 * 3);
+
+    let data = export["data"].as_str().unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(data.as_bytes())
+        .unwrap();
+    assert_eq!(decoded.len(), data_len);
+}
+
+#[test]
+fn cli_writes_mtsdf_json_export() {
+    let temp = tempdir().unwrap();
+    let svg_path = temp.path().join("icon.svg");
+    let json_path = temp.path().join("icon.mtsdf.json");
+    std::fs::write(&svg_path, SIMPLE_SVG).unwrap();
+
+    Command::cargo_bin("rs-msdf")
+        .unwrap()
+        .arg(&svg_path)
+        .arg("--size")
+        .arg("16")
+        .arg("--mode")
+        .arg("mtsdf")
+        .arg("--output")
+        .arg(&json_path)
+        .assert()
+        .success();
+
+    let export: Value = serde_json::from_slice(&std::fs::read(json_path).unwrap()).unwrap();
+    assert_eq!(export["format"], "mtsdf-rgba8");
+    assert_eq!(export["channels"], "rgba");
+    assert_eq!(export["bytes_per_pixel"], 4);
+
+    let data_len = export["data_len"].as_u64().unwrap() as usize;
+    assert_eq!(data_len, 16 * 16 * 4);
+}
+
+#[test]
+fn cli_rejects_unknown_output_extension() {
+    let temp = tempdir().unwrap();
+    let svg_path = temp.path().join("icon.svg");
+    let output_path = temp.path().join("icon.msdf.txt");
+    std::fs::write(&svg_path, SIMPLE_SVG).unwrap();
+
+    Command::cargo_bin("rs-msdf")
+        .unwrap()
+        .arg(&svg_path)
+        .arg("--size")
+        .arg("16")
+        .arg("--output")
+        .arg(&output_path)
+        .assert()
+        .failure();
 }
 
 #[test]

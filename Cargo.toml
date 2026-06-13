@@ -1,10 +1,10 @@
 [package]
 name = "rs-msdf"
 version = "0.1.0"
-edition = "2026"
+edition = "2024"
 license = "Apache-2.0"
 description = "A small Rust-based multi-channel signed distance field generator for SVGs."
-repository = "https://github.com/StraiF/rs-msdf"
+repository = "https://github.com/StraiFRBLX/rs-msdf"
 
 [lib]
 name = "rs_msdf"
@@ -15,6 +15,7 @@ name = "rs-msdf"
 path = "src/main.rs"
 
 [dependencies]
+base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 png = "0.17"
 rayon = "1.10"

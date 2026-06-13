@@ -32,6 +32,7 @@ pub(crate) fn parse_svg(svg: &[u8]) -> Result<ParsedSvg> {
         return Err(Error::EmptyGeometry);
     }
 
+    shape.normalize();
     shape.color_edges();
     Ok(ParsedSvg { shape, svg_bounds })
 }
@@ -191,7 +192,7 @@ fn collect_path_data(
                     segments.push(Segment::Line {
                         p0,
                         p1,
-                        color: EdgeColor::Red,
+                        color: EdgeColor::WHITE,
                     });
                 }
                 current = Some(p1);
@@ -206,7 +207,7 @@ fn collect_path_data(
                     p0,
                     p1,
                     p2,
-                    color: EdgeColor::Red,
+                    color: EdgeColor::WHITE,
                 });
                 current = Some(p2);
             }
@@ -222,19 +223,19 @@ fn collect_path_data(
                     p1,
                     p2,
                     p3,
-                    color: EdgeColor::Red,
+                    color: EdgeColor::WHITE,
                 });
                 current = Some(p3);
             }
             tiny_skia_path::PathSegment::Close => {
-                if let (Some(p0), Some(p1)) = (current, start) {
-                    if p0 != p1 {
-                        segments.push(Segment::Line {
-                            p0,
-                            p1,
-                            color: EdgeColor::Red,
-                        });
-                    }
+                if let (Some(p0), Some(p1)) = (current, start)
+                    && p0 != p1
+                {
+                    segments.push(Segment::Line {
+                        p0,
+                        p1,
+                        color: EdgeColor::WHITE,
+                    });
                 }
                 current = start;
                 finish_contour(&mut segments, fill_rule, contours);
@@ -307,5 +308,19 @@ mod tests {
         let parsed = parse_svg(svg).unwrap();
         assert!(!parsed.shape.contours.is_empty());
         assert!(parsed.shape.bounds().unwrap().height() > 0.0);
+    }
+
+    #[test]
+    fn preserves_non_zero_hole_winding() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+              <path d="M1 1 H9 V9 H1 Z M3 3 V7 H7 V3 Z" fill="black" fill-rule="nonzero"/>
+            </svg>
+        "#;
+
+        let parsed = parse_svg(svg).unwrap();
+
+        assert!(parsed.shape.contains(Point::new(2.0, 2.0)));
+        assert!(!parsed.shape.contains(Point::new(5.0, 5.0)));
     }
 }

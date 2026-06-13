@@ -23,6 +23,8 @@ impl Bounds {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MsdfMetadata {
     pub format: &'static str,
+    pub channels: &'static str,
+    pub bytes_per_pixel: u32,
     pub width: u32,
     pub height: u32,
     pub range_px: f64,
@@ -41,7 +43,9 @@ impl MsdfMetadata {
         translation: [f64; 2],
     ) -> Self {
         Self {
-            format: "msdf-rgb8",
+            format: options.mode.format(),
+            channels: options.mode.channel_name(),
+            bytes_per_pixel: options.mode.channels() as u32,
             width: options.width,
             height: options.height,
             range_px: options.range_px,

@@ -1,13 +1,50 @@
-//! Library facade for SVG to RGB MSDF generation.
+//! Library facade for SVG distance field generation.
 
 mod error;
+mod export;
 mod geometry;
 mod metadata;
 mod parser;
 mod raster;
 
 pub use error::{Error, Result};
+pub use export::MsdfJsonExport;
 pub use metadata::{Bounds, MsdfMetadata};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DistanceFieldMode {
+    Sdf,
+    Psdf,
+    Msdf,
+    Mtsdf,
+}
+
+impl DistanceFieldMode {
+    pub fn channels(self) -> usize {
+        match self {
+            Self::Sdf | Self::Psdf => 1,
+            Self::Msdf => 3,
+            Self::Mtsdf => 4,
+        }
+    }
+
+    pub fn format(self) -> &'static str {
+        match self {
+            Self::Sdf => "sdf-r8",
+            Self::Psdf => "psdf-r8",
+            Self::Msdf => "msdf-rgb8",
+            Self::Mtsdf => "mtsdf-rgba8",
+        }
+    }
+
+    pub fn channel_name(self) -> &'static str {
+        match self {
+            Self::Sdf | Self::Psdf => "r",
+            Self::Msdf => "rgb",
+            Self::Mtsdf => "rgba",
+        }
+    }
+}
 
 /// Options controlling MSDF texture generation.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -15,18 +52,25 @@ pub struct MsdfOptions {
     pub width: u32,
     pub height: u32,
     pub range_px: f64,
+    pub mode: DistanceFieldMode,
 }
 
 impl MsdfOptions {
-    /// Creates a new option set and validates it.
+    /// Creates a new option set for RGB MSDF generation and validates it.
     pub fn new(width: u32, height: u32, range_px: f64) -> Result<Self> {
         let options = Self {
             width,
             height,
             range_px,
+            mode: DistanceFieldMode::Msdf,
         };
         options.validate()?;
         Ok(options)
+    }
+
+    pub fn with_mode(mut self, mode: DistanceFieldMode) -> Self {
+        self.mode = mode;
+        self
     }
 
     pub fn validate(self) -> Result<()> {
@@ -46,17 +90,18 @@ impl MsdfOptions {
     }
 }
 
-/// Generated MSDF pixels and placement metadata.
+/// Generated distance field pixels and placement metadata.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MsdfOutput {
     pub width: u32,
     pub height: u32,
-    /// Interleaved 8-bit RGB MSDF pixels.
-    pub rgb_pixels: Vec<u8>,
+    pub channels: usize,
+    /// Interleaved 8-bit pixel data.
+    pub pixels: Vec<u8>,
     pub metadata: MsdfMetadata,
 }
 
-/// Converts SVG bytes into an 8-bit RGB MSDF image.
+/// Converts SVG bytes into an 8-bit distance field image.
 pub fn generate_from_svg(svg: &[u8], options: MsdfOptions) -> Result<MsdfOutput> {
     options.validate()?;
 
@@ -73,7 +118,8 @@ pub fn generate_from_svg(svg: &[u8], options: MsdfOptions) -> Result<MsdfOutput>
     Ok(MsdfOutput {
         width: options.width,
         height: options.height,
-        rgb_pixels: rasterized.rgb_pixels,
+        channels: rasterized.channels,
+        pixels: rasterized.pixels,
         metadata,
     })
 }
@@ -81,6 +127,7 @@ pub fn generate_from_svg(svg: &[u8], options: MsdfOptions) -> Result<MsdfOutput>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
 
     const SIMPLE_SVG: &[u8] = br#"
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
@@ -99,11 +146,56 @@ mod tests {
     fn generates_expected_pixel_count_and_metadata() {
         let output = generate_from_svg(SIMPLE_SVG, MsdfOptions::new(8, 8, 2.0).unwrap()).unwrap();
 
-        assert_eq!(output.rgb_pixels.len(), 8 * 8 * 3);
+        assert_eq!(output.pixels.len(), 8 * 8 * 3);
+        assert_eq!(output.channels, 3);
         assert_eq!(output.metadata.format, "msdf-rgb8");
+        assert_eq!(output.metadata.channels, "rgb");
         assert_eq!(output.metadata.width, 8);
         assert_eq!(output.metadata.height, 8);
         assert_eq!(output.metadata.range_px, 2.0);
         assert!(output.metadata.scale > 0.0);
+    }
+
+    #[test]
+    fn supports_all_distance_field_modes() {
+        for (mode, channels, format) in [
+            (DistanceFieldMode::Sdf, 1, "sdf-r8"),
+            (DistanceFieldMode::Psdf, 1, "psdf-r8"),
+            (DistanceFieldMode::Msdf, 3, "msdf-rgb8"),
+            (DistanceFieldMode::Mtsdf, 4, "mtsdf-rgba8"),
+        ] {
+            let options = MsdfOptions::new(8, 8, 2.0).unwrap().with_mode(mode);
+            let output = generate_from_svg(SIMPLE_SVG, options).unwrap();
+
+            assert_eq!(output.channels, channels);
+            assert_eq!(output.pixels.len(), 8 * 8 * channels);
+            assert_eq!(output.metadata.format, format);
+        }
+    }
+
+    #[test]
+    fn json_export_contains_base64_pixels_and_metadata() {
+        let output = generate_from_svg(SIMPLE_SVG, MsdfOptions::new(8, 8, 2.0).unwrap()).unwrap();
+        let export = MsdfJsonExport::from_output(&output);
+
+        assert_eq!(export.kind, "rs-msdf");
+        assert_eq!(export.version, 1);
+        assert_eq!(export.format, "msdf-rgb8");
+        assert_eq!(export.encoding, "base64");
+        assert_eq!(export.channels, "rgb");
+        assert_eq!(export.bytes_per_pixel, 3);
+        assert_eq!(export.width, output.width);
+        assert_eq!(export.height, output.height);
+        assert_eq!(export.range_px, output.metadata.range_px);
+        assert_eq!(export.data_len, output.pixels.len());
+        assert_eq!(export.svg_bounds, output.metadata.svg_bounds);
+        assert_eq!(export.geometry_bounds, output.metadata.geometry_bounds);
+        assert_eq!(export.scale, output.metadata.scale);
+        assert_eq!(export.translation, output.metadata.translation);
+
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(export.data.as_bytes())
+            .unwrap();
+        assert_eq!(decoded, output.pixels);
     }
 }

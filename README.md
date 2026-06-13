@@ -9,15 +9,31 @@ into an 8-bit RGB MSDF PNG plus JSON placement metadata.
 
 ```sh
 rs-msdf input.svg --size 64 --output icon.msdf.png
-rs-msdf input.svg --size 128x96 --range 4 --output icon.msdf.png
+rs-msdf input.svg --size 128x96 --distance-range 4 --output icon.msdf.png
+rs-msdf input.svg --size 64 --output icon.msdf.json
+rs-msdf input.svg --size 64 --mode mtsdf --output icon.mtsdf.png
 ```
 
 `--size` is required and accepts either `N` for square textures or `WxH` for
-rectangular textures. `--range` is measured in output pixels and defaults to
-`4.0`.
+rectangular textures. `--distance-range` is measured in output pixels and
+defaults to `4.0`. The old `--range` spelling is still accepted as an alias.
 
-By default, metadata is written next to the PNG with a `.json` extension. Use
-`--metadata path/to/file.json` to choose a specific metadata path.
+`--mode` selects the generated distance field:
+
+- `sdf`: single-channel true signed distance field.
+- `psdf`: single-channel pseudo/perpendicular signed distance field.
+- `msdf`: RGB multi-channel signed distance field. This is the default.
+- `mtsdf`: RGB MSDF plus alpha true SDF.
+
+The output format is inferred from `--output`. A `.png` output writes a PNG plus
+a metadata sidecar; by default, metadata is written next to the PNG with a
+`.json` extension. Use `--metadata path/to/file.json` to choose a specific
+metadata path.
+
+A `.json` output writes a self-contained compact JSON export instead of a PNG. It
+includes the distance-field metadata and the interleaved pixel bytes as a base64
+string, which is suitable for conversion into byte-oriented runtimes such as Luau
+buffers.
 
 ## Library
 
