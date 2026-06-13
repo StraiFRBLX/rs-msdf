@@ -5,6 +5,52 @@ A small Rust-based multi-channel signed distance field generator for SVG files.
 `rs-msdf` provides both a reusable Rust library and a CLI that converts one SVG
 into an 8-bit RGB MSDF PNG plus JSON placement metadata.
 
+## Setup
+
+To use `rs-msdf` from another local Rust project, add it as a path dependency in
+that project's `Cargo.toml`:
+
+```toml
+[dependencies]
+rs-msdf = { path = "../rs-msdf" }
+```
+
+Adjust the path to wherever this repository lives relative to the consuming
+project. If you want to depend on the Git repository instead:
+
+```toml
+[dependencies]
+rs-msdf = { git = "https://github.com/StraiFRBLX/rs-msdf" }
+```
+
+The package name uses a hyphen in `Cargo.toml`, but Rust code imports it with an
+underscore:
+
+```rust
+use rs_msdf::{generate_from_svg, MsdfOptions};
+
+fn main() -> rs_msdf::Result<()> {
+    let svg = std::fs::read("input.svg")?;
+    let output = generate_from_svg(&svg, MsdfOptions::new(64, 64, 4.0)?)?;
+
+    println!(
+        "{}x{} {}-channel MSDF, {} bytes",
+        output.width,
+        output.height,
+        output.channels,
+        output.pixels.len()
+    );
+
+    Ok(())
+}
+```
+
+To install the CLI from a local checkout:
+
+```sh
+cargo install --path .
+```
+
 ## CLI
 
 ```sh
