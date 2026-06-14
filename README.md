@@ -1,6 +1,6 @@
 # rs-msdf
 
-A small Rust-based multi-channel signed distance field generator for SVG files.
+A Rust-based multi-channel signed distance field generator for SVG files.
 
 `rs-msdf` provides both a reusable Rust library and a CLI that converts one SVG
 into an 8-bit RGB MSDF PNG plus JSON placement metadata.
