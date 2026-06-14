@@ -8,8 +8,13 @@ mod parser;
 mod raster;
 
 pub use error::{Error, Result};
-pub use export::{JsonCompression, JsonExportOptions, MsdfJsonExport};
+pub use export::{
+    JsonCompression, JsonExportOptions, MsdfJsonExport, encode_png, write_json_export_file,
+    write_metadata_json_file, write_png_file,
+};
 pub use metadata::{Bounds, MsdfMetadata};
+use rayon::prelude::*;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DistanceFieldMode {
@@ -180,10 +185,62 @@ pub fn generate_from_svg(svg: &[u8], options: MsdfOptions) -> Result<MsdfOutput>
     })
 }
 
+/// Reads an SVG file and converts it into an 8-bit distance field image.
+pub fn generate_from_svg_file(path: impl AsRef<Path>, options: MsdfOptions) -> Result<MsdfOutput> {
+    let svg = std::fs::read(path)?;
+    generate_from_svg(&svg, options)
+}
+
+/// Expands either a single SVG path or a glob pattern into sorted SVG paths.
+pub fn expand_svg_inputs(input: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
+    let input = input.as_ref();
+    let input_string = input.to_string_lossy();
+    if !has_glob_metacharacters(&input_string) {
+        return Ok(vec![input.to_path_buf()]);
+    }
+
+    let mut inputs = Vec::new();
+    for entry in glob::glob(&input_string)? {
+        let path = entry?;
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+        {
+            inputs.push(path);
+        }
+    }
+    inputs.sort();
+
+    if inputs.is_empty() {
+        return Err(Error::InvalidOptions(format!(
+            "input glob `{input_string}` did not match any SVG files"
+        )));
+    }
+
+    Ok(inputs)
+}
+
+/// Generates distance fields for multiple SVG files in parallel.
+pub fn generate_from_svg_files(
+    paths: &[PathBuf],
+    options: MsdfOptions,
+) -> Vec<(PathBuf, Result<MsdfOutput>)> {
+    paths
+        .par_iter()
+        .map(|path| (path.clone(), generate_from_svg_file(path, options)))
+        .collect()
+}
+
+fn has_glob_metacharacters(value: &str) -> bool {
+    value.contains(['*', '?', '['])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use base64::Engine;
+    use tempfile::tempdir;
 
     const SIMPLE_SVG: &[u8] = br#"
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
@@ -272,7 +329,7 @@ mod tests {
             MsdfJsonExport::from_output_with_options(&output, JsonExportOptions::zstd(10)).unwrap();
 
         assert_eq!(compressed.version, 2);
-        assert_eq!(compressed.encoding, "base64+zstd");
+        assert_eq!(compressed.encoding, "base64+zstd+png-filter");
         assert_eq!(compressed.uncompressed_data_len, output.pixels.len());
         assert!(compressed.data.len() < raw.data.len());
 
@@ -280,8 +337,54 @@ mod tests {
             .decode(compressed.data.as_bytes())
             .unwrap();
         assert_eq!(decoded.len(), compressed.data_len);
-        let decompressed = zstd::stream::decode_all(decoded.as_slice()).unwrap();
-        assert_eq!(decompressed, output.pixels);
+        let decompressed = oxiarc_zstd::decode_all(&decoded).unwrap();
+        assert_eq!(unfilter_scanlines(&decompressed, &output), output.pixels);
+    }
+
+    #[test]
+    fn public_export_helpers_match_cli_capabilities() {
+        let temp = tempdir().unwrap();
+        let svg_path = temp.path().join("icon.svg");
+        let png_path = temp.path().join("icon.png");
+        let metadata_path = temp.path().join("icon.json");
+        let export_path = temp.path().join("icon.export.json");
+        std::fs::write(&svg_path, SIMPLE_SVG).unwrap();
+
+        let output =
+            generate_from_svg_file(&svg_path, MsdfOptions::new(16, 16, 4.0).unwrap()).unwrap();
+        let png = encode_png(&output).unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+
+        write_png_file(&png_path, &output).unwrap();
+        write_metadata_json_file(&metadata_path, &output.metadata, true).unwrap();
+        let export =
+            MsdfJsonExport::from_output_with_options(&output, JsonExportOptions::raw()).unwrap();
+        write_json_export_file(&export_path, &export).unwrap();
+
+        assert!(png_path.exists());
+        assert!(metadata_path.exists());
+        assert!(export_path.exists());
+    }
+
+    #[test]
+    fn public_glob_and_batch_helpers_match_cli_bulk_input() {
+        let temp = tempdir().unwrap();
+        let input_dir = temp.path().join("icons");
+        std::fs::create_dir(&input_dir).unwrap();
+        std::fs::write(input_dir.join("a.svg"), SIMPLE_SVG).unwrap();
+        std::fs::write(input_dir.join("b.svg"), SIMPLE_SVG).unwrap();
+
+        let pattern = format!(
+            "{}/{}",
+            input_dir.display().to_string().replace('\\', "/"),
+            "*.svg"
+        );
+        let inputs = expand_svg_inputs(pattern).unwrap();
+        assert_eq!(inputs.len(), 2);
+
+        let outputs = generate_from_svg_files(&inputs, MsdfOptions::new(8, 8, 2.0).unwrap());
+        assert_eq!(outputs.len(), 2);
+        assert!(outputs.into_iter().all(|(_, output)| output.is_ok()));
     }
 
     #[test]
@@ -308,5 +411,66 @@ mod tests {
         let ty = ty.clamp(0.0, f64::from(output.height - 1)) as usize;
         let offset = (ty * output.width as usize + tx) * output.channels + channel;
         output.pixels[offset]
+    }
+
+    fn unfilter_scanlines(filtered: &[u8], output: &MsdfOutput) -> Vec<u8> {
+        let width = output.width as usize;
+        let height = output.height as usize;
+        let bytes_per_pixel = output.channels;
+        let row_len = width * bytes_per_pixel;
+        assert_eq!(filtered.len(), height * (row_len + 1));
+
+        let mut pixels = vec![0; output.pixels.len()];
+        for y in 0..height {
+            let filtered_row_start = y * (row_len + 1);
+            let filter = filtered[filtered_row_start];
+            let filtered_row = &filtered[filtered_row_start + 1..filtered_row_start + 1 + row_len];
+            for x in 0..row_len {
+                let left = if x >= bytes_per_pixel {
+                    pixels[y * row_len + x - bytes_per_pixel]
+                } else {
+                    0
+                };
+                let up = if y > 0 {
+                    pixels[(y - 1) * row_len + x]
+                } else {
+                    0
+                };
+                let upper_left = if y > 0 && x >= bytes_per_pixel {
+                    pixels[(y - 1) * row_len + x - bytes_per_pixel]
+                } else {
+                    0
+                };
+                let predictor = match filter {
+                    0 => 0,
+                    1 => left,
+                    2 => up,
+                    3 => ((u16::from(left) + u16::from(up)) / 2) as u8,
+                    4 => paeth_predictor(left, up, upper_left),
+                    _ => panic!("unknown filter {filter}"),
+                };
+                pixels[y * row_len + x] = filtered_row[x].wrapping_add(predictor);
+            }
+        }
+
+        pixels
+    }
+
+    fn paeth_predictor(left: u8, up: u8, upper_left: u8) -> u8 {
+        let left = i16::from(left);
+        let up = i16::from(up);
+        let upper_left = i16::from(upper_left);
+        let estimate = left + up - upper_left;
+        let left_distance = (estimate - left).abs();
+        let up_distance = (estimate - up).abs();
+        let upper_left_distance = (estimate - upper_left).abs();
+
+        if left_distance <= up_distance && left_distance <= upper_left_distance {
+            left as u8
+        } else if up_distance <= upper_left_distance {
+            up as u8
+        } else {
+            upper_left as u8
+        }
     }
 }

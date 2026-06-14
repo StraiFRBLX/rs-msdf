@@ -54,18 +54,19 @@ cargo install --path .
 ## CLI
 
 ```sh
-rs-msdf input.svg --size 64 --output icon.msdf.png
-rs-msdf input.svg --size 128x96 --distance-range 4 --output icon.msdf.png
-rs-msdf input.svg --size 64 --output icon.msdf.json
-rs-msdf input.svg --size 64 --mode mtsdf --output icon.mtsdf.png
-rs-msdf "icons/*.svg" --size 64 --out-dir dist --format json
+rs-msdf input.svg -s 64 -o icon.msdf.png
+rs-msdf input.svg -s 128x96 -r 4 -o icon.msdf.png
+rs-msdf input.svg -s 64 -o icon.msdf.json
+rs-msdf input.svg -s 64 -m mtsdf -o icon.mtsdf.png
+rs-msdf input.svg -s 512x384 -m mtsdf --compress -o icon.mtsdf.json
+rs-msdf "icons/*.svg" -s 64 -d dist -f json
 ```
 
-`--size` is required and accepts either `N` for square textures or `WxH` for
-rectangular textures. `--distance-range` is measured in output pixels and
-defaults to `4.0`. The old `--range` spelling is still accepted as an alias.
+`-s, --size` is required and accepts either `N` for square textures or `WxH` for
+rectangular textures. `-r, --range` is measured in output pixels and defaults to
+`4.0`. The old `--distance-range` spelling is still accepted as an alias.
 
-`--mode` selects the generated distance field:
+`-m, --mode` selects the generated distance field:
 
 - `sdf`: single-channel true signed distance field.
 - `psdf`: single-channel pseudo/perpendicular signed distance field.
@@ -74,29 +75,64 @@ defaults to `4.0`. The old `--range` spelling is still accepted as an alias.
 
 The output format is inferred from `--output`. A `.png` output writes a PNG plus
 a metadata sidecar; by default, metadata is written next to the PNG with a
-`.json` extension. Use `--metadata path/to/file.json` to choose a specific
+`.json` extension. Use `-M, --metadata path/to/file.json` to choose a specific
 metadata path.
 
 A `.json` output writes a self-contained compact JSON export instead of a PNG.
-By default, the interleaved pixel bytes are compressed with zstd and then
-base64-encoded (`encoding: "base64+zstd"`). Decode JSON data by base64-decoding
-`data`, zstd-decompressing it to `uncompressed_data_len` bytes, and interpreting
-the result as tightly packed pixels. Use `--json-compression raw` to write the
-uncompressed base64 payload (`encoding: "base64"`).
+By default, the interleaved pixel bytes are written as uncompressed base64
+(`encoding: "base64"`). Pass `-c, --compress` to PNG-filter the rows, compress
+them with zstd, and then base64-encode them (`encoding:
+"base64+zstd+png-filter"`). Decode compressed JSON data by base64-decoding
+`data`, zstd-decompressing it, reversing the per-row PNG filters, and
+interpreting the result as `uncompressed_data_len` tightly packed pixel bytes.
+Use `-l, --compression-level` to choose a zstd level from 1 to 22.
 
 Bulk input is supported with glob patterns. When the input expands to multiple
-SVG files, use `--out-dir` and `--format png|json` instead of `--output`.
+SVG files, use `-d, --out-dir` and `-f, --format png|json` instead of
+`-o, --output`.
 Generated files are named `<input-stem>.<mode>.png` or
-`<input-stem>.<mode>.json`. Use `--jobs N` to choose a Rayon worker count.
+`<input-stem>.<mode>.json`. Use `-j, --jobs N` to choose a Rayon worker count.
 
 ## Library
 
 ```rust
-use rs_msdf::{generate_from_svg, JsonExportOptions, MsdfJsonExport, MsdfOptions};
+use rs_msdf::{
+    generate_from_svg,
+    write_png_file,
+    write_metadata_json_file,
+    write_json_export_file,
+    JsonExportOptions,
+    MsdfJsonExport,
+    MsdfOptions,
+};
 
 let svg = std::fs::read("input.svg")?;
 let output = generate_from_svg(&svg, MsdfOptions::new(64, 64, 4.0)?)?;
-let json = MsdfJsonExport::from_output_with_options(&output, JsonExportOptions::zstd(10))?;
+
+write_png_file("icon.msdf.png", &output)?;
+write_metadata_json_file("icon.msdf.json", &output.metadata, true)?;
+
+let raw_json = MsdfJsonExport::from_output(&output);
+write_json_export_file("icon.raw.json", &raw_json)?;
+
+let compressed_json =
+    MsdfJsonExport::from_output_with_options(&output, JsonExportOptions::zstd(10))?;
+write_json_export_file("icon.compressed.json", &compressed_json)?;
+```
+
+For bulk processing from Rust, use the same glob expansion and parallel
+generation helpers as the CLI:
+
+```rust
+use rs_msdf::{expand_svg_inputs, generate_from_svg_files, MsdfOptions};
+
+let inputs = expand_svg_inputs("icons/*.svg")?;
+let outputs = generate_from_svg_files(&inputs, MsdfOptions::new(64, 64, 4.0)?);
+
+for (path, output) in outputs {
+    let output = output?;
+    println!("generated {} ({} bytes)", path.display(), output.pixels.len());
+}
 ```
 
 ## SVG Support

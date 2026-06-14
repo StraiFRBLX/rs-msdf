@@ -60,7 +60,7 @@ fn cli_writes_self_contained_json_export() {
     assert_eq!(export["kind"], "rs-msdf");
     assert_eq!(export["version"], 2);
     assert_eq!(export["format"], "msdf-rgb8");
-    assert_eq!(export["encoding"], "base64+zstd");
+    assert_eq!(export["encoding"], "base64");
     assert_eq!(export["channels"], "rgb");
     assert_eq!(export["bytes_per_pixel"], 3);
     assert_eq!(export["width"], 16);
@@ -69,18 +69,17 @@ fn cli_writes_self_contained_json_export() {
     let data_len = export["data_len"].as_u64().unwrap() as usize;
     let uncompressed_data_len = export["uncompressed_data_len"].as_u64().unwrap() as usize;
     assert_eq!(uncompressed_data_len, 16 * 16 * 3);
+    assert_eq!(data_len, uncompressed_data_len);
 
     let data = export["data"].as_str().unwrap();
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(data.as_bytes())
         .unwrap();
     assert_eq!(decoded.len(), data_len);
-    let decompressed = zstd::stream::decode_all(decoded.as_slice()).unwrap();
-    assert_eq!(decompressed.len(), uncompressed_data_len);
 }
 
 #[test]
-fn cli_writes_raw_json_export_when_requested() {
+fn cli_writes_compressed_json_export_when_requested() {
     let temp = tempdir().unwrap();
     let svg_path = temp.path().join("icon.svg");
     let json_path = temp.path().join("icon.msdf.json");
@@ -91,25 +90,56 @@ fn cli_writes_raw_json_export_when_requested() {
         .arg(&svg_path)
         .arg("--size")
         .arg("16")
-        .arg("--json-compression")
-        .arg("raw")
+        .arg("--compress")
         .arg("--output")
         .arg(&json_path)
         .assert()
         .success();
 
     let export: Value = serde_json::from_slice(&std::fs::read(json_path).unwrap()).unwrap();
-    assert_eq!(export["encoding"], "base64");
+    assert_eq!(export["encoding"], "base64+zstd+png-filter");
     let data_len = export["data_len"].as_u64().unwrap() as usize;
     let uncompressed_data_len = export["uncompressed_data_len"].as_u64().unwrap() as usize;
-    assert_eq!(data_len, 16 * 16 * 3);
-    assert_eq!(uncompressed_data_len, data_len);
+    assert_eq!(uncompressed_data_len, 16 * 16 * 3);
 
     let data = export["data"].as_str().unwrap();
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(data.as_bytes())
         .unwrap();
     assert_eq!(decoded.len(), data_len);
+    let decompressed = oxiarc_zstd::decode_all(&decoded).unwrap();
+    assert_eq!(decompressed.len(), 16 * (16 * 3 + 1));
+    assert!(decompressed.len() > uncompressed_data_len);
+}
+
+#[test]
+fn cli_accepts_short_aliases() {
+    let temp = tempdir().unwrap();
+    let svg_path = temp.path().join("icon.svg");
+    let json_path = temp.path().join("icon.mtsdf.json");
+    std::fs::write(&svg_path, SIMPLE_SVG).unwrap();
+
+    Command::cargo_bin("rs-msdf")
+        .unwrap()
+        .arg(&svg_path)
+        .arg("-s")
+        .arg("16")
+        .arg("-m")
+        .arg("mtsdf")
+        .arg("-r")
+        .arg("5")
+        .arg("-c")
+        .arg("-l")
+        .arg("7")
+        .arg("-o")
+        .arg(&json_path)
+        .assert()
+        .success();
+
+    let export: Value = serde_json::from_slice(&std::fs::read(json_path).unwrap()).unwrap();
+    assert_eq!(export["format"], "mtsdf-rgba8");
+    assert_eq!(export["range_px"], 5.0);
+    assert_eq!(export["encoding"], "base64+zstd+png-filter");
 }
 
 #[test]
@@ -135,7 +165,7 @@ fn cli_writes_mtsdf_json_export() {
     assert_eq!(export["format"], "mtsdf-rgba8");
     assert_eq!(export["channels"], "rgba");
     assert_eq!(export["bytes_per_pixel"], 4);
-    assert_eq!(export["encoding"], "base64+zstd");
+    assert_eq!(export["encoding"], "base64");
 
     let uncompressed_data_len = export["uncompressed_data_len"].as_u64().unwrap() as usize;
     assert_eq!(uncompressed_data_len, 16 * 16 * 4);
@@ -153,11 +183,11 @@ fn cli_expands_glob_inputs_into_out_dir() {
     Command::cargo_bin("rs-msdf")
         .unwrap()
         .arg(glob_pattern(&input_dir))
-        .arg("--size")
+        .arg("-s")
         .arg("16")
-        .arg("--out-dir")
+        .arg("-d")
         .arg(&output_dir)
-        .arg("--format")
+        .arg("-f")
         .arg("json")
         .assert()
         .success();
@@ -178,13 +208,13 @@ fn cli_rejects_glob_with_output_file() {
     Command::cargo_bin("rs-msdf")
         .unwrap()
         .arg(glob_pattern(&input_dir))
-        .arg("--size")
+        .arg("-s")
         .arg("16")
-        .arg("--out-dir")
+        .arg("-d")
         .arg(&output_dir)
-        .arg("--format")
+        .arg("-f")
         .arg("json")
-        .arg("--output")
+        .arg("-o")
         .arg(temp.path().join("one.json"))
         .assert()
         .failure();
@@ -202,13 +232,13 @@ fn cli_rejects_glob_with_metadata_file() {
     Command::cargo_bin("rs-msdf")
         .unwrap()
         .arg(glob_pattern(&input_dir))
-        .arg("--size")
+        .arg("-s")
         .arg("16")
-        .arg("--out-dir")
+        .arg("-d")
         .arg(&output_dir)
-        .arg("--format")
+        .arg("-f")
         .arg("png")
-        .arg("--metadata")
+        .arg("-M")
         .arg(temp.path().join("meta.json"))
         .assert()
         .failure();

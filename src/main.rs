@@ -1,12 +1,11 @@
-use std::fs::File;
-use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, ValueEnum};
 use rayon::prelude::*;
 use rs_msdf::{
     DistanceFieldMode, Error, JsonCompression, JsonExportOptions, MsdfJsonExport, MsdfOptions,
-    Result, generate_from_svg,
+    Result, expand_svg_inputs, generate_from_svg_file, write_json_export_file,
+    write_metadata_json_file, write_png_file,
 };
 
 #[derive(Debug, Parser)]
@@ -16,15 +15,20 @@ struct Args {
     input: PathBuf,
 
     /// Output texture size, either N for square or WxH.
-    #[arg(long, value_parser = parse_size)]
+    #[arg(short, long, value_parser = parse_size)]
     size: (u32, u32),
 
     /// Distance field type to generate.
-    #[arg(long, value_enum, default_value_t = CliMode::Msdf)]
+    #[arg(short, long, value_enum, default_value_t = CliMode::Msdf)]
     mode: CliMode,
 
     /// Signed distance range in output pixels.
-    #[arg(long = "distance-range", alias = "range", default_value_t = 4.0)]
+    #[arg(
+        short = 'r',
+        long = "range",
+        alias = "distance-range",
+        default_value_t = 4.0
+    )]
     distance_range: f64,
 
     /// Output file. Use .png for a PNG plus metadata sidecar, or .json for a self-contained data export.
@@ -32,27 +36,27 @@ struct Args {
     output: Option<PathBuf>,
 
     /// Output directory for glob/bulk input.
-    #[arg(long)]
+    #[arg(short = 'd', long)]
     out_dir: Option<PathBuf>,
 
     /// Output format for glob/bulk input.
-    #[arg(long, value_enum)]
+    #[arg(short, long, value_enum)]
     format: Option<OutputFormat>,
 
     /// Output JSON metadata file for PNG output. Defaults to the PNG path with a .json extension.
-    #[arg(long)]
+    #[arg(short = 'M', long)]
     metadata: Option<PathBuf>,
 
-    /// JSON pixel payload compression.
-    #[arg(long, value_enum, default_value_t = JsonCompressionArg::Zstd)]
-    json_compression: JsonCompressionArg,
+    /// Compress JSON pixel data with zstd and PNG-style row filters.
+    #[arg(short, long)]
+    compress: bool,
 
     /// Zstd compression level for JSON exports.
-    #[arg(long, default_value_t = 10)]
-    compression_level: i32,
+    #[arg(short = 'l', long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=22))]
+    compression_level: u32,
 
     /// Number of worker threads for generation. Defaults to Rayon automatic sizing.
-    #[arg(long)]
+    #[arg(short, long)]
     jobs: Option<usize>,
 }
 
@@ -90,12 +94,6 @@ impl CliMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-enum JsonCompressionArg {
-    Raw,
-    Zstd,
-}
-
 impl From<CliMode> for DistanceFieldMode {
     fn from(mode: CliMode) -> Self {
         match mode {
@@ -130,7 +128,7 @@ fn run() -> Result<()> {
             .build_global()?;
     }
 
-    let inputs = expand_inputs(&args.input)?;
+    let inputs = expand_svg_inputs(&args.input)?;
     let output_jobs = resolve_output_jobs(&args, &inputs)?;
     let options = MsdfOptions::new(args.size.0, args.size.1, args.distance_range)?
         .with_mode(args.mode.into());
@@ -168,30 +166,21 @@ fn process_job(
     options: MsdfOptions,
     json_options: JsonExportOptions,
 ) -> Result<()> {
-    let svg = std::fs::read(&job.input)?;
-    let output = generate_from_svg(&svg, options)?;
+    let output = generate_from_svg_file(&job.input, options)?;
 
     match job.format {
         OutputFormat::Png => {
-            write_png(
-                &job.output,
-                output.width,
-                output.height,
-                output.channels,
-                &output.pixels,
-            )?;
+            write_png_file(&job.output, &output)?;
 
             let metadata_path = job
                 .metadata
                 .clone()
                 .unwrap_or_else(|| default_metadata_path(&job.output));
-            let metadata = serde_json::to_vec_pretty(&output.metadata)?;
-            std::fs::write(metadata_path, metadata)?;
+            write_metadata_json_file(metadata_path, &output.metadata, true)?;
         }
         OutputFormat::Json => {
             let export = MsdfJsonExport::from_output_with_options(&output, json_options)?;
-            let json = serde_json::to_vec(&export)?;
-            std::fs::write(&job.output, json)?;
+            write_json_export_file(&job.output, &export)?;
         }
     }
 
@@ -199,48 +188,17 @@ fn process_job(
 }
 
 fn json_export_options(args: &Args) -> JsonExportOptions {
-    match args.json_compression {
-        JsonCompressionArg::Raw => JsonExportOptions {
-            compression: JsonCompression::Raw,
-        },
-        JsonCompressionArg::Zstd => JsonExportOptions {
+    if args.compress {
+        JsonExportOptions {
             compression: JsonCompression::Zstd {
                 level: args.compression_level,
             },
-        },
-    }
-}
-
-fn expand_inputs(input: &Path) -> Result<Vec<PathBuf>> {
-    let input_string = input.to_string_lossy();
-    if !has_glob_metacharacters(&input_string) {
-        return Ok(vec![input.to_path_buf()]);
-    }
-
-    let mut inputs = Vec::new();
-    for entry in glob::glob(&input_string)? {
-        let path = entry?;
-        if path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
-        {
-            inputs.push(path);
+        }
+    } else {
+        JsonExportOptions {
+            compression: JsonCompression::Raw,
         }
     }
-    inputs.sort();
-
-    if inputs.is_empty() {
-        return Err(Error::InvalidOptions(format!(
-            "input glob `{input_string}` did not match any SVG files"
-        )));
-    }
-
-    Ok(inputs)
-}
-
-fn has_glob_metacharacters(value: &str) -> bool {
-    value.contains(['*', '?', '['])
 }
 
 fn resolve_output_jobs(args: &Args, inputs: &[PathBuf]) -> Result<Vec<OutputJob>> {
@@ -301,26 +259,6 @@ fn resolve_output_jobs(args: &Args, inputs: &[PathBuf]) -> Result<Vec<OutputJob>
             })
         })
         .collect()
-}
-
-fn write_png(path: &Path, width: u32, height: u32, channels: usize, pixels: &[u8]) -> Result<()> {
-    let file = File::create(path)?;
-    let writer = BufWriter::new(file);
-    let mut encoder = png::Encoder::new(writer, width, height);
-    encoder.set_color(match channels {
-        1 => png::ColorType::Grayscale,
-        3 => png::ColorType::Rgb,
-        4 => png::ColorType::Rgba,
-        _ => {
-            return Err(Error::InvalidOptions(format!(
-                "unsupported channel count `{channels}`"
-            )));
-        }
-    });
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header()?;
-    writer.write_image_data(pixels)?;
-    Ok(())
 }
 
 fn default_metadata_path(output: &Path) -> PathBuf {
