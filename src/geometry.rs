@@ -351,6 +351,49 @@ impl Segment {
             }
         }
     }
+
+    fn scanline_intersections(&self, y: f64, intersections: &mut impl FnMut(f64, i32)) {
+        match *self {
+            Segment::Line { p0, p1, .. } => {
+                add_line_scanline_intersection(p0, p1, y, intersections);
+            }
+            Segment::Quad { p0, p1, p2, .. } => {
+                let mut roots = [0.0; 3];
+                let count = solve_quadratic(
+                    &mut roots,
+                    p0.y - 2.0 * p1.y + p2.y,
+                    2.0 * (p1.y - p0.y),
+                    p0.y - y,
+                );
+                for &t in &roots[..count.max(0) as usize] {
+                    add_curve_scanline_intersection(self, t, intersections);
+                }
+            }
+            Segment::Cubic { p0, p1, p2, p3, .. } => {
+                let mut roots = [0.0; 3];
+                let count = solve_cubic(
+                    &mut roots,
+                    -p0.y + 3.0 * p1.y - 3.0 * p2.y + p3.y,
+                    3.0 * (p0.y - 2.0 * p1.y + p2.y),
+                    3.0 * (p1.y - p0.y),
+                    p0.y - y,
+                );
+                let mut accepted = [f64::NAN; 3];
+                let mut accepted_count = 0;
+                for &t in &roots[..count.max(0) as usize] {
+                    if accepted[..accepted_count]
+                        .iter()
+                        .any(|&other| (t - other).abs() <= 1.0e-7)
+                    {
+                        continue;
+                    }
+                    accepted[accepted_count] = t;
+                    accepted_count += 1;
+                    add_curve_scanline_intersection(self, t, intersections);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -361,26 +404,11 @@ pub(crate) struct Contour {
 
 impl Contour {
     pub(crate) fn signed_area(&self) -> f64 {
-        let points = self.sampled_points();
-        if points.len() < 3 {
-            return 0.0;
-        }
+        let mut first = None;
+        let mut previous = None;
+        let mut sum = 0.0;
+        let mut point_count = 0;
 
-        points
-            .iter()
-            .zip(points.iter().cycle().skip(1))
-            .take(points.len())
-            .map(|(a, b)| a.x * b.y - b.x * a.y)
-            .sum::<f64>()
-            * 0.5
-    }
-
-    pub(crate) fn winding(&self) -> i32 {
-        if self.signed_area() >= 0.0 { 1 } else { -1 }
-    }
-
-    fn sampled_points(&self) -> Vec<Point> {
-        let mut points = Vec::new();
         for segment in &self.segments {
             let steps = match segment {
                 Segment::Line { .. } => 1,
@@ -388,38 +416,63 @@ impl Contour {
                 Segment::Cubic { .. } => 20,
             };
 
-            if points.is_empty() {
-                points.push(segment.start());
+            if first.is_none() {
+                let start = segment.start();
+                first = Some(start);
+                previous = Some(start);
+                point_count += 1;
             }
 
             for i in 1..=steps {
-                points.push(segment.point_at(i as f64 / steps as f64));
+                let current = segment.point_at(i as f64 / steps as f64);
+                if let Some(previous) = previous {
+                    sum += previous.cross(current);
+                }
+                previous = Some(current);
+                point_count += 1;
             }
         }
-        points
+
+        let (Some(first), Some(previous)) = (first, previous) else {
+            return 0.0;
+        };
+        if point_count < 3 {
+            return 0.0;
+        }
+
+        (sum + previous.cross(first)) * 0.5
+    }
+
+    pub(crate) fn winding(&self) -> i32 {
+        if self.signed_area() >= 0.0 { 1 } else { -1 }
     }
 
     pub(crate) fn contains(&self, p: Point) -> bool {
-        let points = self.sampled_points();
-        if points.len() < 3 {
-            return false;
-        }
+        self.ray_crossing_count(p) % 2 != 0
+    }
 
-        let mut inside = false;
-        let mut previous = *points.last().unwrap();
-        for current in points {
-            let crosses = (current.y > p.y) != (previous.y > p.y);
-            if crosses {
-                let x = (previous.x - current.x) * (p.y - current.y)
-                    / (previous.y - current.y + EPSILON)
-                    + current.x;
+    fn ray_crossing_count(&self, p: Point) -> i32 {
+        let mut crossings = 0;
+        for segment in &self.segments {
+            segment.scanline_intersections(p.y, &mut |x, _| {
                 if p.x < x {
-                    inside = !inside;
+                    crossings += 1;
                 }
-            }
-            previous = current;
+            });
         }
-        inside
+        crossings
+    }
+
+    fn ray_winding(&self, p: Point) -> i32 {
+        let mut winding = 0;
+        for segment in &self.segments {
+            segment.scanline_intersections(p.y, &mut |x, direction| {
+                if p.x < x {
+                    winding += direction;
+                }
+            });
+        }
+        winding
     }
 
     #[allow(dead_code)]
@@ -449,14 +502,12 @@ impl Shape {
         let mut winding = 0_i32;
 
         for contour in &self.contours {
-            if !contour.contains(p) {
-                continue;
-            }
-
             match contour.fill_rule {
-                FillRule::EvenOdd => even_odd_inside = !even_odd_inside,
+                FillRule::EvenOdd => {
+                    even_odd_inside ^= contour.ray_crossing_count(p) % 2 != 0;
+                }
                 FillRule::NonZero => {
-                    winding += if contour.signed_area() >= 0.0 { 1 } else { -1 };
+                    winding += contour.ray_winding(p);
                 }
             }
         }
@@ -488,6 +539,38 @@ impl Shape {
             }
         }
     }
+}
+
+fn add_line_scanline_intersection(
+    p0: Point,
+    p1: Point,
+    y: f64,
+    intersections: &mut impl FnMut(f64, i32),
+) {
+    let y0 = p0.y;
+    let y1 = p1.y;
+    if (y0 <= y && y < y1) || (y1 <= y && y < y0) {
+        let t = (y - y0) / (y1 - y0);
+        let x = p0.x + (p1.x - p0.x) * t;
+        intersections(x, if y1 > y0 { 1 } else { -1 });
+    }
+}
+
+fn add_curve_scanline_intersection(
+    segment: &Segment,
+    t: f64,
+    intersections: &mut impl FnMut(f64, i32),
+) {
+    if !(0.0..1.0).contains(&t) {
+        return;
+    }
+
+    let tangent = segment.tangent_at(t);
+    if tangent.y.abs() <= EPSILON {
+        return;
+    }
+
+    intersections(segment.point_at(t).x, if tangent.y > 0.0 { 1 } else { -1 });
 }
 
 fn add_quadratic_extrema(bounds: &mut BoundsBuilder, p0: Point, p1: Point, p2: Point) {

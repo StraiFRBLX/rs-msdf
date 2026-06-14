@@ -8,7 +8,7 @@ mod parser;
 mod raster;
 
 pub use error::{Error, Result};
-pub use export::MsdfJsonExport;
+pub use export::{JsonCompression, JsonExportOptions, MsdfJsonExport};
 pub use metadata::{Bounds, MsdfMetadata};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,6 +46,41 @@ impl DistanceFieldMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCorrectionMode {
+    Disabled,
+    EdgePriority,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ErrorCorrectionConfig {
+    pub mode: ErrorCorrectionMode,
+}
+
+impl ErrorCorrectionConfig {
+    pub fn disabled() -> Self {
+        Self {
+            mode: ErrorCorrectionMode::Disabled,
+        }
+    }
+
+    pub fn edge_priority() -> Self {
+        Self {
+            mode: ErrorCorrectionMode::EdgePriority,
+        }
+    }
+
+    pub(crate) fn enabled(self) -> bool {
+        self.mode != ErrorCorrectionMode::Disabled
+    }
+}
+
+impl Default for ErrorCorrectionConfig {
+    fn default() -> Self {
+        Self::edge_priority()
+    }
+}
+
 /// Options controlling MSDF texture generation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MsdfOptions {
@@ -53,6 +88,9 @@ pub struct MsdfOptions {
     pub height: u32,
     pub range_px: f64,
     pub mode: DistanceFieldMode,
+    pub error_correction: ErrorCorrectionConfig,
+    pub overlap_support: bool,
+    pub scanline_sign_correction: bool,
 }
 
 impl MsdfOptions {
@@ -63,6 +101,9 @@ impl MsdfOptions {
             height,
             range_px,
             mode: DistanceFieldMode::Msdf,
+            error_correction: ErrorCorrectionConfig::default(),
+            overlap_support: true,
+            scanline_sign_correction: true,
         };
         options.validate()?;
         Ok(options)
@@ -70,6 +111,21 @@ impl MsdfOptions {
 
     pub fn with_mode(mut self, mode: DistanceFieldMode) -> Self {
         self.mode = mode;
+        self
+    }
+
+    pub fn with_error_correction(mut self, error_correction: ErrorCorrectionConfig) -> Self {
+        self.error_correction = error_correction;
+        self
+    }
+
+    pub fn with_overlap_support(mut self, overlap_support: bool) -> Self {
+        self.overlap_support = overlap_support;
+        self
+    }
+
+    pub fn with_scanline_sign_correction(mut self, scanline_sign_correction: bool) -> Self {
+        self.scanline_sign_correction = scanline_sign_correction;
         self
     }
 
@@ -179,7 +235,7 @@ mod tests {
         let export = MsdfJsonExport::from_output(&output);
 
         assert_eq!(export.kind, "rs-msdf");
-        assert_eq!(export.version, 1);
+        assert_eq!(export.version, 2);
         assert_eq!(export.format, "msdf-rgb8");
         assert_eq!(export.encoding, "base64");
         assert_eq!(export.channels, "rgb");
@@ -192,10 +248,65 @@ mod tests {
         assert_eq!(export.geometry_bounds, output.metadata.geometry_bounds);
         assert_eq!(export.scale, output.metadata.scale);
         assert_eq!(export.translation, output.metadata.translation);
+        assert_eq!(export.uncompressed_data_len, output.pixels.len());
 
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(export.data.as_bytes())
             .unwrap();
+        assert_eq!(decoded.len(), export.data_len);
         assert_eq!(decoded, output.pixels);
+    }
+
+    #[test]
+    fn json_export_supports_zstd_compression() {
+        let output = generate_from_svg(
+            include_bytes!("../tests/fixtures/monospace-overlap.svg"),
+            MsdfOptions::new(256, 64, 4.0)
+                .unwrap()
+                .with_mode(DistanceFieldMode::Mtsdf),
+        )
+        .unwrap();
+
+        let raw = MsdfJsonExport::from_output(&output);
+        let compressed =
+            MsdfJsonExport::from_output_with_options(&output, JsonExportOptions::zstd(10)).unwrap();
+
+        assert_eq!(compressed.version, 2);
+        assert_eq!(compressed.encoding, "base64+zstd");
+        assert_eq!(compressed.uncompressed_data_len, output.pixels.len());
+        assert!(compressed.data.len() < raw.data.len());
+
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(compressed.data.as_bytes())
+            .unwrap();
+        assert_eq!(decoded.len(), compressed.data_len);
+        let decompressed = zstd::stream::decode_all(decoded.as_slice()).unwrap();
+        assert_eq!(decompressed, output.pixels);
+    }
+
+    #[test]
+    fn mtsdf_overlap_fixture_keeps_filled_bar_opaque() {
+        let output = generate_from_svg(
+            include_bytes!("../tests/fixtures/monospace-overlap.svg"),
+            MsdfOptions::new(512, 128, 4.0)
+                .unwrap()
+                .with_mode(DistanceFieldMode::Mtsdf),
+        )
+        .unwrap();
+
+        let alpha = sample_svg_point(&output, 275.0, 30.5, 3);
+        assert!(
+            alpha > 128,
+            "expected overlap bar alpha to be inside/opaque, got {alpha}"
+        );
+    }
+
+    fn sample_svg_point(output: &MsdfOutput, x: f64, y: f64, channel: usize) -> u8 {
+        let tx = (x * output.metadata.scale + output.metadata.translation[0]).round();
+        let ty = (y * output.metadata.scale + output.metadata.translation[1]).round();
+        let tx = tx.clamp(0.0, f64::from(output.width - 1)) as usize;
+        let ty = ty.clamp(0.0, f64::from(output.height - 1)) as usize;
+        let offset = (ty * output.width as usize + tx) * output.channels + channel;
+        output.pixels[offset]
     }
 }

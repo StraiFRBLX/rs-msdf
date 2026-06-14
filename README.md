@@ -58,6 +58,7 @@ rs-msdf input.svg --size 64 --output icon.msdf.png
 rs-msdf input.svg --size 128x96 --distance-range 4 --output icon.msdf.png
 rs-msdf input.svg --size 64 --output icon.msdf.json
 rs-msdf input.svg --size 64 --mode mtsdf --output icon.mtsdf.png
+rs-msdf "icons/*.svg" --size 64 --out-dir dist --format json
 ```
 
 `--size` is required and accepts either `N` for square textures or `WxH` for
@@ -76,18 +77,26 @@ a metadata sidecar; by default, metadata is written next to the PNG with a
 `.json` extension. Use `--metadata path/to/file.json` to choose a specific
 metadata path.
 
-A `.json` output writes a self-contained compact JSON export instead of a PNG. It
-includes the distance-field metadata and the interleaved pixel bytes as a base64
-string, which is suitable for conversion into byte-oriented runtimes such as Luau
-buffers.
+A `.json` output writes a self-contained compact JSON export instead of a PNG.
+By default, the interleaved pixel bytes are compressed with zstd and then
+base64-encoded (`encoding: "base64+zstd"`). Decode JSON data by base64-decoding
+`data`, zstd-decompressing it to `uncompressed_data_len` bytes, and interpreting
+the result as tightly packed pixels. Use `--json-compression raw` to write the
+uncompressed base64 payload (`encoding: "base64"`).
+
+Bulk input is supported with glob patterns. When the input expands to multiple
+SVG files, use `--out-dir` and `--format png|json` instead of `--output`.
+Generated files are named `<input-stem>.<mode>.png` or
+`<input-stem>.<mode>.json`. Use `--jobs N` to choose a Rayon worker count.
 
 ## Library
 
 ```rust
-use rs_msdf::{generate_from_svg, MsdfOptions};
+use rs_msdf::{generate_from_svg, JsonExportOptions, MsdfJsonExport, MsdfOptions};
 
 let svg = std::fs::read("input.svg")?;
 let output = generate_from_svg(&svg, MsdfOptions::new(64, 64, 4.0)?)?;
+let json = MsdfJsonExport::from_output_with_options(&output, JsonExportOptions::zstd(10))?;
 ```
 
 ## SVG Support

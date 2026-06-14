@@ -27,4 +27,13 @@ pub enum Error {
 
     #[error("JSON encoding error: {0}")]
     Json(#[from] serde_json::Error),
+
+    #[error("glob pattern error: {0}")]
+    GlobPattern(#[from] glob::PatternError),
+
+    #[error("glob expansion error: {0}")]
+    Glob(#[from] glob::GlobError),
+
+    #[error("thread pool error: {0}")]
+    ThreadPool(#[from] rayon::ThreadPoolBuildError),
 }

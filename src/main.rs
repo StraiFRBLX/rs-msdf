@@ -3,12 +3,16 @@ use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, ValueEnum};
-use rs_msdf::{DistanceFieldMode, Error, MsdfJsonExport, MsdfOptions, Result, generate_from_svg};
+use rayon::prelude::*;
+use rs_msdf::{
+    DistanceFieldMode, Error, JsonCompression, JsonExportOptions, MsdfJsonExport, MsdfOptions,
+    Result, generate_from_svg,
+};
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
 struct Args {
-    /// Input SVG file.
+    /// Input SVG file or glob pattern.
     input: PathBuf,
 
     /// Output texture size, either N for square or WxH.
@@ -25,17 +29,46 @@ struct Args {
 
     /// Output file. Use .png for a PNG plus metadata sidecar, or .json for a self-contained data export.
     #[arg(long, short)]
-    output: PathBuf,
+    output: Option<PathBuf>,
+
+    /// Output directory for glob/bulk input.
+    #[arg(long)]
+    out_dir: Option<PathBuf>,
+
+    /// Output format for glob/bulk input.
+    #[arg(long, value_enum)]
+    format: Option<OutputFormat>,
 
     /// Output JSON metadata file for PNG output. Defaults to the PNG path with a .json extension.
     #[arg(long)]
     metadata: Option<PathBuf>,
+
+    /// JSON pixel payload compression.
+    #[arg(long, value_enum, default_value_t = JsonCompressionArg::Zstd)]
+    json_compression: JsonCompressionArg,
+
+    /// Zstd compression level for JSON exports.
+    #[arg(long, default_value_t = 10)]
+    compression_level: i32,
+
+    /// Number of worker threads for generation. Defaults to Rayon automatic sizing.
+    #[arg(long)]
+    jobs: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 enum OutputFormat {
     Png,
     Json,
+}
+
+impl OutputFormat {
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Json => "json",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -44,6 +77,23 @@ enum CliMode {
     Psdf,
     Msdf,
     Mtsdf,
+}
+
+impl CliMode {
+    fn suffix(self) -> &'static str {
+        match self {
+            Self::Sdf => "sdf",
+            Self::Psdf => "psdf",
+            Self::Msdf => "msdf",
+            Self::Mtsdf => "mtsdf",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum JsonCompressionArg {
+    Raw,
+    Zstd,
 }
 
 impl From<CliMode> for DistanceFieldMode {
@@ -57,6 +107,13 @@ impl From<CliMode> for DistanceFieldMode {
     }
 }
 
+struct OutputJob {
+    input: PathBuf,
+    output: PathBuf,
+    metadata: Option<PathBuf>,
+    format: OutputFormat,
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("error: {error}");
@@ -66,36 +123,184 @@ fn main() {
 
 fn run() -> Result<()> {
     let args = Args::parse();
-    let format = output_format_from_path(&args.output)?;
-    let svg = std::fs::read(&args.input)?;
+
+    if let Some(jobs) = args.jobs {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(jobs)
+            .build_global()?;
+    }
+
+    let inputs = expand_inputs(&args.input)?;
+    let output_jobs = resolve_output_jobs(&args, &inputs)?;
     let options = MsdfOptions::new(args.size.0, args.size.1, args.distance_range)?
         .with_mode(args.mode.into());
+    let json_options = json_export_options(&args);
+
+    if output_jobs.len() == 1 {
+        process_job(&output_jobs[0], options, json_options)?;
+        return Ok(());
+    }
+
+    let failures: Vec<_> = output_jobs
+        .par_iter()
+        .filter_map(|job| {
+            process_job(job, options, json_options)
+                .err()
+                .map(|error| format!("{}: {error}", job.input.display()))
+        })
+        .collect();
+
+    if !failures.is_empty() {
+        for failure in &failures {
+            eprintln!("failed: {failure}");
+        }
+        return Err(Error::InvalidOptions(format!(
+            "{} input(s) failed during bulk export",
+            failures.len()
+        )));
+    }
+
+    Ok(())
+}
+
+fn process_job(
+    job: &OutputJob,
+    options: MsdfOptions,
+    json_options: JsonExportOptions,
+) -> Result<()> {
+    let svg = std::fs::read(&job.input)?;
     let output = generate_from_svg(&svg, options)?;
 
-    match format {
+    match job.format {
         OutputFormat::Png => {
             write_png(
-                &args.output,
+                &job.output,
                 output.width,
                 output.height,
                 output.channels,
                 &output.pixels,
             )?;
 
-            let metadata_path = args
+            let metadata_path = job
                 .metadata
-                .unwrap_or_else(|| default_metadata_path(&args.output));
+                .clone()
+                .unwrap_or_else(|| default_metadata_path(&job.output));
             let metadata = serde_json::to_vec_pretty(&output.metadata)?;
             std::fs::write(metadata_path, metadata)?;
         }
         OutputFormat::Json => {
-            let export = MsdfJsonExport::from_output(&output);
+            let export = MsdfJsonExport::from_output_with_options(&output, json_options)?;
             let json = serde_json::to_vec(&export)?;
-            std::fs::write(&args.output, json)?;
+            std::fs::write(&job.output, json)?;
         }
     }
 
     Ok(())
+}
+
+fn json_export_options(args: &Args) -> JsonExportOptions {
+    match args.json_compression {
+        JsonCompressionArg::Raw => JsonExportOptions {
+            compression: JsonCompression::Raw,
+        },
+        JsonCompressionArg::Zstd => JsonExportOptions {
+            compression: JsonCompression::Zstd {
+                level: args.compression_level,
+            },
+        },
+    }
+}
+
+fn expand_inputs(input: &Path) -> Result<Vec<PathBuf>> {
+    let input_string = input.to_string_lossy();
+    if !has_glob_metacharacters(&input_string) {
+        return Ok(vec![input.to_path_buf()]);
+    }
+
+    let mut inputs = Vec::new();
+    for entry in glob::glob(&input_string)? {
+        let path = entry?;
+        if path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("svg"))
+        {
+            inputs.push(path);
+        }
+    }
+    inputs.sort();
+
+    if inputs.is_empty() {
+        return Err(Error::InvalidOptions(format!(
+            "input glob `{input_string}` did not match any SVG files"
+        )));
+    }
+
+    Ok(inputs)
+}
+
+fn has_glob_metacharacters(value: &str) -> bool {
+    value.contains(['*', '?', '['])
+}
+
+fn resolve_output_jobs(args: &Args, inputs: &[PathBuf]) -> Result<Vec<OutputJob>> {
+    if inputs.len() == 1 {
+        let output = args.output.clone().ok_or_else(|| {
+            Error::InvalidOptions("single-file input requires --output".to_string())
+        })?;
+        let format = output_format_from_path(&output)?;
+        return Ok(vec![OutputJob {
+            input: inputs[0].clone(),
+            output,
+            metadata: args.metadata.clone(),
+            format,
+        }]);
+    }
+
+    if args.output.is_some() {
+        return Err(Error::InvalidOptions(
+            "--output cannot be used when the input expands to multiple SVG files; use --out-dir and --format"
+                .to_string(),
+        ));
+    }
+    if args.metadata.is_some() {
+        return Err(Error::InvalidOptions(
+            "--metadata cannot be used with multiple SVG inputs".to_string(),
+        ));
+    }
+
+    let out_dir = args
+        .out_dir
+        .as_ref()
+        .ok_or_else(|| Error::InvalidOptions("bulk input requires --out-dir".to_string()))?;
+    let format = args.format.ok_or_else(|| {
+        Error::InvalidOptions("bulk input requires --format png or --format json".to_string())
+    })?;
+    std::fs::create_dir_all(out_dir)?;
+
+    inputs
+        .iter()
+        .map(|input| {
+            let stem = input
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .ok_or_else(|| {
+                    Error::InvalidOptions(format!(
+                        "input path `{}` has no valid file stem",
+                        input.display()
+                    ))
+                })?;
+            let file_name = format!("{}.{}.{}", stem, args.mode.suffix(), format.extension());
+            let output = out_dir.join(file_name);
+            let metadata = (format == OutputFormat::Png).then(|| default_metadata_path(&output));
+            Ok(OutputJob {
+                input: input.clone(),
+                output,
+                metadata,
+                format,
+            })
+        })
+        .collect()
 }
 
 fn write_png(path: &Path, width: u32, height: u32, channels: usize, pixels: &[u8]) -> Result<()> {

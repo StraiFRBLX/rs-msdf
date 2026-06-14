@@ -17,6 +17,7 @@ path = "src/main.rs"
 [dependencies]
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
+glob = "0.3"
 png = "0.17"
 rayon = "1.10"
 roxmltree = "0.21"
@@ -25,6 +26,7 @@ serde_json = "1.0"
 thiserror = "2.0"
 tiny-skia-path = "0.12"
 usvg = "0.47"
+zstd = "0.13"
 
 [dev-dependencies]
 assert_cmd = "2.0"

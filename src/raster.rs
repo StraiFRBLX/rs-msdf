@@ -55,7 +55,8 @@ pub(crate) fn render_msdf(shape: &Shape, options: MsdfOptions) -> Result<Rasteri
             let y = index as u32 / options.width;
             let texture_point = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
             let shape_point = projection.unproject(texture_point);
-            let distance = shape_distance(shape, shape_point, options.mode);
+            let distance =
+                shape_distance(shape, shape_point, options.mode, options.overlap_support);
 
             match options.mode {
                 DistanceFieldMode::Sdf => {
@@ -78,7 +79,19 @@ pub(crate) fn render_msdf(shape: &Shape, options: MsdfOptions) -> Result<Rasteri
             }
         });
 
-    if channels >= 3 {
+    if options.scanline_sign_correction {
+        correct_distance_signs(
+            &mut values,
+            width,
+            height,
+            channels,
+            options.mode,
+            shape,
+            projection,
+        );
+    }
+
+    if channels >= 3 && options.error_correction.enabled() {
         correct_msdf_errors(
             &mut values,
             width,
@@ -168,7 +181,12 @@ impl DistanceSet {
     }
 }
 
-fn shape_distance(shape: &Shape, p: Point, mode: DistanceFieldMode) -> DistanceSet {
+fn shape_distance(
+    shape: &Shape,
+    p: Point,
+    mode: DistanceFieldMode,
+    overlap_support: bool,
+) -> DistanceSet {
     let shape_sign = if shape.contains(p) { 1.0 } else { -1.0 };
     let mut contour_distances = Vec::with_capacity(shape.contours.len());
     let mut shape_distance = None;
@@ -203,23 +221,27 @@ fn shape_distance(shape: &Shape, p: Point, mode: DistanceFieldMode) -> DistanceS
         };
     };
 
-    let selected = match (inner_distance, outer_distance) {
-        (Some((inner, inner_scalar)), Some((outer, outer_scalar))) => {
-            if inner_scalar >= 0.0 && inner_scalar.abs() <= outer_scalar.abs() {
-                refine_overlapping_distance(&contour_distances, inner, 1, outer_scalar, mode)
-            } else if outer_scalar <= 0.0 && outer_scalar.abs() < inner_scalar.abs() {
-                refine_overlapping_distance(&contour_distances, outer, -1, inner_scalar, mode)
-            } else {
-                shape_distance
+    let selected = if overlap_support {
+        match (inner_distance, outer_distance) {
+            (Some((inner, inner_scalar)), Some((outer, outer_scalar))) => {
+                if inner_scalar >= 0.0 && inner_scalar.abs() <= outer_scalar.abs() {
+                    refine_overlapping_distance(&contour_distances, inner, 1, outer_scalar, mode)
+                } else if outer_scalar <= 0.0 && outer_scalar.abs() < inner_scalar.abs() {
+                    refine_overlapping_distance(&contour_distances, outer, -1, inner_scalar, mode)
+                } else {
+                    shape_distance
+                }
             }
+            (Some((inner, inner_scalar)), None) if inner_scalar >= 0.0 => {
+                refine_overlapping_distance(&contour_distances, inner, 1, f64::INFINITY, mode)
+            }
+            (None, Some((outer, outer_scalar))) if outer_scalar <= 0.0 => {
+                refine_overlapping_distance(&contour_distances, outer, -1, f64::INFINITY, mode)
+            }
+            _ => shape_distance,
         }
-        (Some((inner, inner_scalar)), None) if inner_scalar >= 0.0 => {
-            refine_overlapping_distance(&contour_distances, inner, 1, f64::INFINITY, mode)
-        }
-        (None, Some((outer, outer_scalar))) if outer_scalar <= 0.0 => {
-            refine_overlapping_distance(&contour_distances, outer, -1, f64::INFINITY, mode)
-        }
-        _ => shape_distance,
+    } else {
+        shape_distance
     };
 
     selected.align_to_sign(shape_sign, mode)
@@ -457,6 +479,52 @@ fn align_sign(distance: f64, sign: f64) -> f64 {
 
 fn encode_value(value: f64) -> u8 {
     (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+fn correct_distance_signs(
+    values: &mut [f64],
+    width: usize,
+    height: usize,
+    channels: usize,
+    mode: DistanceFieldMode,
+    shape: &Shape,
+    projection: Projection,
+) {
+    for y in 0..height {
+        for x in 0..width {
+            let shape_point = projection.unproject(Point::new(x as f64 + 0.5, y as f64 + 0.5));
+            let fill = shape.contains(shape_point);
+            let offset = (y * width + x) * channels;
+
+            match mode {
+                DistanceFieldMode::Sdf | DistanceFieldMode::Psdf => {
+                    correct_scalar_sign(&mut values[offset], fill);
+                }
+                DistanceFieldMode::Msdf => {
+                    correct_multi_sign(&mut values[offset..offset + 3], fill);
+                }
+                DistanceFieldMode::Mtsdf => {
+                    correct_multi_sign(&mut values[offset..offset + 3], fill);
+                    correct_scalar_sign(&mut values[offset + 3], fill);
+                }
+            }
+        }
+    }
+}
+
+fn correct_scalar_sign(value: &mut f64, fill: bool) {
+    if *value != 0.5 && (*value > 0.5) != fill {
+        *value = 1.0 - *value;
+    }
+}
+
+fn correct_multi_sign(values: &mut [f64], fill: bool) {
+    let med = median([values[0], values[1], values[2]]);
+    if med != 0.5 && (med > 0.5) != fill {
+        values[0] = 1.0 - values[0];
+        values[1] = 1.0 - values[1];
+        values[2] = 1.0 - values[2];
+    }
 }
 
 fn correct_msdf_errors(
