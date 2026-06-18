@@ -194,6 +194,9 @@ fn shape_distance(
     let mut outer_distance = None;
 
     for contour in &shape.contours {
+        if !contour.is_boundary {
+            continue;
+        }
         if contour.segments.is_empty() {
             continue;
         }
@@ -551,6 +554,9 @@ fn protect_corners(
     projection: Projection,
 ) {
     for contour in &shape.contours {
+        if !contour.is_boundary {
+            continue;
+        }
         if contour.segments.is_empty() {
             continue;
         }

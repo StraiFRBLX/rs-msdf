@@ -400,6 +400,7 @@ impl Segment {
 pub(crate) struct Contour {
     pub segments: Vec<Segment>,
     pub fill_rule: FillRule,
+    pub is_boundary: bool,
 }
 
 impl Contour {
@@ -1066,6 +1067,7 @@ mod tests {
     fn contour_contains_points() {
         let contour = Contour {
             fill_rule: FillRule::NonZero,
+            is_boundary: true,
             segments: vec![
                 Segment::Line {
                     p0: Point::new(0.0, 0.0),
@@ -1099,6 +1101,7 @@ mod tests {
         let mut shape = Shape {
             contours: vec![Contour {
                 fill_rule: FillRule::NonZero,
+                is_boundary: true,
                 segments: vec![
                     Segment::Line {
                         p0: Point::new(0.0, 0.0),
