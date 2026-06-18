@@ -3,9 +3,8 @@ use std::path::{Path, PathBuf};
 use clap::{Parser, ValueEnum};
 use rayon::prelude::*;
 use rs_msdf::{
-    DistanceFieldMode, Error, JsonCompression, JsonExportOptions, MsdfJsonExport, MsdfOptions,
-    Result, expand_svg_inputs, generate_from_svg_file, write_json_export_file,
-    write_metadata_json_file, write_png_file,
+    DistanceFieldMode, Error, MsdfJsonExport, MsdfOptions, Result, expand_svg_inputs,
+    generate_from_svg_file, write_json_export_file, write_metadata_json_file, write_png_file,
 };
 
 #[derive(Debug, Parser)]
@@ -46,14 +45,6 @@ struct Args {
     /// Output JSON metadata file for PNG output. Defaults to the PNG path with a .json extension.
     #[arg(short = 'M', long)]
     metadata: Option<PathBuf>,
-
-    /// Compress JSON pixel data with zstd and PNG-style row filters.
-    #[arg(short, long)]
-    compress: bool,
-
-    /// Zstd compression level for JSON exports.
-    #[arg(short = 'l', long, default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=22))]
-    compression_level: u32,
 
     /// Number of worker threads for generation. Defaults to Rayon automatic sizing.
     #[arg(short, long)]
@@ -132,17 +123,16 @@ fn run() -> Result<()> {
     let output_jobs = resolve_output_jobs(&args, &inputs)?;
     let options = MsdfOptions::new(args.size.0, args.size.1, args.distance_range)?
         .with_mode(args.mode.into());
-    let json_options = json_export_options(&args);
 
     if output_jobs.len() == 1 {
-        process_job(&output_jobs[0], options, json_options)?;
+        process_job(&output_jobs[0], options)?;
         return Ok(());
     }
 
     let failures: Vec<_> = output_jobs
         .par_iter()
         .filter_map(|job| {
-            process_job(job, options, json_options)
+            process_job(job, options)
                 .err()
                 .map(|error| format!("{}: {error}", job.input.display()))
         })
@@ -161,11 +151,7 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn process_job(
-    job: &OutputJob,
-    options: MsdfOptions,
-    json_options: JsonExportOptions,
-) -> Result<()> {
+fn process_job(job: &OutputJob, options: MsdfOptions) -> Result<()> {
     let output = generate_from_svg_file(&job.input, options)?;
 
     match job.format {
@@ -179,26 +165,12 @@ fn process_job(
             write_metadata_json_file(metadata_path, &output.metadata, true)?;
         }
         OutputFormat::Json => {
-            let export = MsdfJsonExport::from_output_with_options(&output, json_options)?;
+            let export = MsdfJsonExport::from_output(&output)?;
             write_json_export_file(&job.output, &export)?;
         }
     }
 
     Ok(())
-}
-
-fn json_export_options(args: &Args) -> JsonExportOptions {
-    if args.compress {
-        JsonExportOptions {
-            compression: JsonCompression::Zstd {
-                level: args.compression_level,
-            },
-        }
-    } else {
-        JsonExportOptions {
-            compression: JsonCompression::Raw,
-        }
-    }
 }
 
 fn resolve_output_jobs(args: &Args, inputs: &[PathBuf]) -> Result<Vec<OutputJob>> {

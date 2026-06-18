@@ -1,6 +1,7 @@
 use assert_cmd::Command;
 use base64::Engine;
 use serde_json::Value;
+use std::io::Cursor;
 use tempfile::tempdir;
 
 const SIMPLE_SVG: &str = r#"
@@ -58,28 +59,65 @@ fn cli_writes_self_contained_json_export() {
 
     let export: Value = serde_json::from_slice(&std::fs::read(json_path).unwrap()).unwrap();
     assert_eq!(export["kind"], "rs-msdf");
-    assert_eq!(export["version"], 2);
+    assert_eq!(export["version"], 3);
     assert_eq!(export["format"], "msdf-rgb8");
-    assert_eq!(export["encoding"], "base64");
+    assert_eq!(export["encoding"], "base64-png");
     assert_eq!(export["channels"], "rgb");
     assert_eq!(export["bytes_per_pixel"], 3);
     assert_eq!(export["width"], 16);
     assert_eq!(export["height"], 16);
+    assert!(export.get("data").is_none());
+    assert!(export.get("data_len").is_none());
+    assert!(export.get("uncompressed_data_len").is_none());
 
-    let data_len = export["data_len"].as_u64().unwrap() as usize;
-    let uncompressed_data_len = export["uncompressed_data_len"].as_u64().unwrap() as usize;
-    assert_eq!(uncompressed_data_len, 16 * 16 * 3);
-    assert_eq!(data_len, uncompressed_data_len);
-
-    let data = export["data"].as_str().unwrap();
+    let data = export["png_base64"].as_str().unwrap();
     let decoded = base64::engine::general_purpose::STANDARD
         .decode(data.as_bytes())
         .unwrap();
-    assert_eq!(decoded.len(), data_len);
+    assert!(decoded.starts_with(b"\x89PNG\r\n\x1a\n"));
 }
 
 #[test]
-fn cli_writes_compressed_json_export_when_requested() {
+fn cli_png_and_json_embedded_png_share_dimensions() {
+    let temp = tempdir().unwrap();
+    let svg_path = temp.path().join("icon.svg");
+    let png_path = temp.path().join("icon.msdf.png");
+    let json_path = temp.path().join("icon.msdf.json");
+    std::fs::write(&svg_path, SIMPLE_SVG).unwrap();
+
+    Command::cargo_bin("rs-msdf")
+        .unwrap()
+        .arg(&svg_path)
+        .arg("--size")
+        .arg("32x24")
+        .arg("--output")
+        .arg(&png_path)
+        .assert()
+        .success();
+
+    Command::cargo_bin("rs-msdf")
+        .unwrap()
+        .arg(&svg_path)
+        .arg("--size")
+        .arg("32x24")
+        .arg("--output")
+        .arg(&json_path)
+        .assert()
+        .success();
+
+    let export: Value = serde_json::from_slice(&std::fs::read(json_path).unwrap()).unwrap();
+    let embedded = base64::engine::general_purpose::STANDARD
+        .decode(export["png_base64"].as_str().unwrap().as_bytes())
+        .unwrap();
+
+    assert_eq!(
+        png_dimensions(&std::fs::read(png_path).unwrap()),
+        png_dimensions(&embedded)
+    );
+}
+
+#[test]
+fn cli_rejects_removed_compress_flag() {
     let temp = tempdir().unwrap();
     let svg_path = temp.path().join("icon.svg");
     let json_path = temp.path().join("icon.msdf.json");
@@ -94,22 +132,27 @@ fn cli_writes_compressed_json_export_when_requested() {
         .arg("--output")
         .arg(&json_path)
         .assert()
-        .success();
+        .failure();
+}
 
-    let export: Value = serde_json::from_slice(&std::fs::read(json_path).unwrap()).unwrap();
-    assert_eq!(export["encoding"], "base64+zstd+png-filter");
-    let data_len = export["data_len"].as_u64().unwrap() as usize;
-    let uncompressed_data_len = export["uncompressed_data_len"].as_u64().unwrap() as usize;
-    assert_eq!(uncompressed_data_len, 16 * 16 * 3);
+#[test]
+fn cli_rejects_removed_compression_level_flag() {
+    let temp = tempdir().unwrap();
+    let svg_path = temp.path().join("icon.svg");
+    let json_path = temp.path().join("icon.msdf.json");
+    std::fs::write(&svg_path, SIMPLE_SVG).unwrap();
 
-    let data = export["data"].as_str().unwrap();
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(data.as_bytes())
-        .unwrap();
-    assert_eq!(decoded.len(), data_len);
-    let decompressed = oxiarc_zstd::decode_all(&decoded).unwrap();
-    assert_eq!(decompressed.len(), 16 * (16 * 3 + 1));
-    assert!(decompressed.len() > uncompressed_data_len);
+    Command::cargo_bin("rs-msdf")
+        .unwrap()
+        .arg(&svg_path)
+        .arg("--size")
+        .arg("16")
+        .arg("--compression-level")
+        .arg("7")
+        .arg("--output")
+        .arg(&json_path)
+        .assert()
+        .failure();
 }
 
 #[test]
@@ -128,9 +171,6 @@ fn cli_accepts_short_aliases() {
         .arg("mtsdf")
         .arg("-r")
         .arg("5")
-        .arg("-c")
-        .arg("-l")
-        .arg("7")
         .arg("-o")
         .arg(&json_path)
         .assert()
@@ -139,7 +179,7 @@ fn cli_accepts_short_aliases() {
     let export: Value = serde_json::from_slice(&std::fs::read(json_path).unwrap()).unwrap();
     assert_eq!(export["format"], "mtsdf-rgba8");
     assert_eq!(export["range_px"], 5.0);
-    assert_eq!(export["encoding"], "base64+zstd+png-filter");
+    assert_eq!(export["encoding"], "base64-png");
 }
 
 #[test]
@@ -165,10 +205,13 @@ fn cli_writes_mtsdf_json_export() {
     assert_eq!(export["format"], "mtsdf-rgba8");
     assert_eq!(export["channels"], "rgba");
     assert_eq!(export["bytes_per_pixel"], 4);
-    assert_eq!(export["encoding"], "base64");
+    assert_eq!(export["encoding"], "base64-png");
 
-    let uncompressed_data_len = export["uncompressed_data_len"].as_u64().unwrap() as usize;
-    assert_eq!(uncompressed_data_len, 16 * 16 * 4);
+    let data = export["png_base64"].as_str().unwrap();
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(data.as_bytes())
+        .unwrap();
+    assert!(decoded.starts_with(b"\x89PNG\r\n\x1a\n"));
 }
 
 #[test]
@@ -281,4 +324,11 @@ fn glob_pattern(dir: &std::path::Path) -> String {
         dir.display().to_string().replace('\\', "/"),
         "*.svg"
     )
+}
+
+fn png_dimensions(data: &[u8]) -> (u32, u32, png::ColorType) {
+    let decoder = png::Decoder::new(Cursor::new(data));
+    let reader = decoder.read_info().unwrap();
+    let info = reader.info();
+    (info.width, info.height, info.color_type)
 }

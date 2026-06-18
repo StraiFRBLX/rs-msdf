@@ -495,24 +495,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "oxiarc-core"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "870de52f96c9df5474080d34ca0c32f5ca1db3e3bd9d6b614436090e86ae7f0c"
-dependencies = [
- "thiserror",
-]
-
-[[package]]
-name = "oxiarc-zstd"
-version = "0.3.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "654fea99a90d0f682e558c8bd2d0dd88df58eed6493e87f743685a0b378c3ca4"
-dependencies = [
- "oxiarc-core",
-]
-
-[[package]]
 name = "pico-args"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -650,7 +632,6 @@ dependencies = [
  "base64",
  "clap",
  "glob",
- "oxiarc-zstd",
  "png",
  "rayon",
  "roxmltree 0.21.1",

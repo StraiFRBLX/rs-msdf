@@ -298,6 +298,35 @@ mod tests {
     }
 
     #[test]
+    fn rejects_filters() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+              <filter id="blur"><feGaussianBlur stdDeviation="1"/></filter>
+              <rect x="1" y="1" width="8" height="8" filter="url(#blur)"/>
+            </svg>
+        "#;
+
+        assert!(matches!(parse_svg(svg), Err(Error::UnsupportedSvg(_))));
+    }
+
+    #[test]
+    fn applies_path_transforms() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20">
+              <path d="M0 0 H4 V4 H0 Z" fill="black" transform="translate(6 7) scale(2)"/>
+            </svg>
+        "#;
+
+        let parsed = parse_svg(svg).unwrap();
+        let bounds = parsed.shape.bounds().unwrap();
+
+        assert_eq!(bounds.min_x, 6.0);
+        assert_eq!(bounds.min_y, 7.0);
+        assert_eq!(bounds.max_x, 14.0);
+        assert_eq!(bounds.max_y, 15.0);
+    }
+
+    #[test]
     fn expands_visible_strokes() {
         let svg = br#"
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
@@ -322,5 +351,36 @@ mod tests {
 
         assert!(parsed.shape.contains(Point::new(2.0, 2.0)));
         assert!(!parsed.shape.contains(Point::new(5.0, 5.0)));
+    }
+
+    #[test]
+    fn preserves_even_odd_holes() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">
+              <path d="M1 1 H9 V9 H1 Z M3 3 H7 V7 H3 Z" fill="black" fill-rule="evenodd"/>
+            </svg>
+        "#;
+
+        let parsed = parse_svg(svg).unwrap();
+
+        assert!(parsed.shape.contains(Point::new(2.0, 2.0)));
+        assert!(!parsed.shape.contains(Point::new(5.0, 5.0)));
+    }
+
+    #[test]
+    fn supports_text_when_usvg_resolves_it_to_outlines() {
+        let svg = br#"
+            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 20">
+              <text x="2" y="14" font-family="Arial, sans-serif" font-size="14">A</text>
+            </svg>
+        "#;
+
+        match parse_svg(svg) {
+            Ok(parsed) => assert!(!parsed.shape.contours.is_empty()),
+            Err(Error::UnsupportedSvg(message)) => {
+                assert!(message.contains("text nodes"));
+            }
+            Err(error) => panic!("unexpected text parsing error: {error}"),
+        }
     }
 }

@@ -28,9 +28,6 @@ pub enum Error {
     #[error("JSON encoding error: {0}")]
     Json(#[from] serde_json::Error),
 
-    #[error("compression error: {0}")]
-    Compression(String),
-
     #[error("glob pattern error: {0}")]
     GlobPattern(#[from] glob::PatternError),
 

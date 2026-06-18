@@ -9,8 +9,7 @@ mod raster;
 
 pub use error::{Error, Result};
 pub use export::{
-    JsonCompression, JsonExportOptions, MsdfJsonExport, encode_png, write_json_export_file,
-    write_metadata_json_file, write_png_file,
+    MsdfJsonExport, encode_png, write_json_export_file, write_metadata_json_file, write_png_file,
 };
 pub use metadata::{Bounds, MsdfMetadata};
 use rayon::prelude::*;
@@ -287,58 +286,28 @@ mod tests {
     }
 
     #[test]
-    fn json_export_contains_base64_pixels_and_metadata() {
+    fn json_export_contains_base64_png_and_metadata() {
         let output = generate_from_svg(SIMPLE_SVG, MsdfOptions::new(8, 8, 2.0).unwrap()).unwrap();
-        let export = MsdfJsonExport::from_output(&output);
+        let export = MsdfJsonExport::from_output(&output).unwrap();
 
         assert_eq!(export.kind, "rs-msdf");
-        assert_eq!(export.version, 2);
+        assert_eq!(export.version, 3);
         assert_eq!(export.format, "msdf-rgb8");
-        assert_eq!(export.encoding, "base64");
+        assert_eq!(export.encoding, "base64-png");
         assert_eq!(export.channels, "rgb");
         assert_eq!(export.bytes_per_pixel, 3);
         assert_eq!(export.width, output.width);
         assert_eq!(export.height, output.height);
         assert_eq!(export.range_px, output.metadata.range_px);
-        assert_eq!(export.data_len, output.pixels.len());
         assert_eq!(export.svg_bounds, output.metadata.svg_bounds);
         assert_eq!(export.geometry_bounds, output.metadata.geometry_bounds);
         assert_eq!(export.scale, output.metadata.scale);
         assert_eq!(export.translation, output.metadata.translation);
-        assert_eq!(export.uncompressed_data_len, output.pixels.len());
 
         let decoded = base64::engine::general_purpose::STANDARD
-            .decode(export.data.as_bytes())
+            .decode(export.png_base64.as_bytes())
             .unwrap();
-        assert_eq!(decoded.len(), export.data_len);
-        assert_eq!(decoded, output.pixels);
-    }
-
-    #[test]
-    fn json_export_supports_zstd_compression() {
-        let output = generate_from_svg(
-            include_bytes!("../tests/fixtures/monospace-overlap.svg"),
-            MsdfOptions::new(256, 64, 4.0)
-                .unwrap()
-                .with_mode(DistanceFieldMode::Mtsdf),
-        )
-        .unwrap();
-
-        let raw = MsdfJsonExport::from_output(&output);
-        let compressed =
-            MsdfJsonExport::from_output_with_options(&output, JsonExportOptions::zstd(10)).unwrap();
-
-        assert_eq!(compressed.version, 2);
-        assert_eq!(compressed.encoding, "base64+zstd+png-filter");
-        assert_eq!(compressed.uncompressed_data_len, output.pixels.len());
-        assert!(compressed.data.len() < raw.data.len());
-
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(compressed.data.as_bytes())
-            .unwrap();
-        assert_eq!(decoded.len(), compressed.data_len);
-        let decompressed = oxiarc_zstd::decode_all(&decoded).unwrap();
-        assert_eq!(unfilter_scanlines(&decompressed, &output), output.pixels);
+        assert!(decoded.starts_with(b"\x89PNG\r\n\x1a\n"));
     }
 
     #[test]
@@ -357,8 +326,7 @@ mod tests {
 
         write_png_file(&png_path, &output).unwrap();
         write_metadata_json_file(&metadata_path, &output.metadata, true).unwrap();
-        let export =
-            MsdfJsonExport::from_output_with_options(&output, JsonExportOptions::raw()).unwrap();
+        let export = MsdfJsonExport::from_output(&output).unwrap();
         write_json_export_file(&export_path, &export).unwrap();
 
         assert!(png_path.exists());
@@ -411,66 +379,5 @@ mod tests {
         let ty = ty.clamp(0.0, f64::from(output.height - 1)) as usize;
         let offset = (ty * output.width as usize + tx) * output.channels + channel;
         output.pixels[offset]
-    }
-
-    fn unfilter_scanlines(filtered: &[u8], output: &MsdfOutput) -> Vec<u8> {
-        let width = output.width as usize;
-        let height = output.height as usize;
-        let bytes_per_pixel = output.channels;
-        let row_len = width * bytes_per_pixel;
-        assert_eq!(filtered.len(), height * (row_len + 1));
-
-        let mut pixels = vec![0; output.pixels.len()];
-        for y in 0..height {
-            let filtered_row_start = y * (row_len + 1);
-            let filter = filtered[filtered_row_start];
-            let filtered_row = &filtered[filtered_row_start + 1..filtered_row_start + 1 + row_len];
-            for x in 0..row_len {
-                let left = if x >= bytes_per_pixel {
-                    pixels[y * row_len + x - bytes_per_pixel]
-                } else {
-                    0
-                };
-                let up = if y > 0 {
-                    pixels[(y - 1) * row_len + x]
-                } else {
-                    0
-                };
-                let upper_left = if y > 0 && x >= bytes_per_pixel {
-                    pixels[(y - 1) * row_len + x - bytes_per_pixel]
-                } else {
-                    0
-                };
-                let predictor = match filter {
-                    0 => 0,
-                    1 => left,
-                    2 => up,
-                    3 => ((u16::from(left) + u16::from(up)) / 2) as u8,
-                    4 => paeth_predictor(left, up, upper_left),
-                    _ => panic!("unknown filter {filter}"),
-                };
-                pixels[y * row_len + x] = filtered_row[x].wrapping_add(predictor);
-            }
-        }
-
-        pixels
-    }
-
-    fn paeth_predictor(left: u8, up: u8, upper_left: u8) -> u8 {
-        let left = i16::from(left);
-        let up = i16::from(up);
-        let upper_left = i16::from(upper_left);
-        let estimate = left + up - upper_left;
-        let left_distance = (estimate - left).abs();
-        let up_distance = (estimate - up).abs();
-        let upper_left_distance = (estimate - upper_left).abs();
-
-        if left_distance <= up_distance && left_distance <= upper_left_distance {
-            left as u8
-        } else if up_distance <= upper_left_distance {
-            up as u8
-        } else {
-            upper_left as u8
-        }
     }
 }
