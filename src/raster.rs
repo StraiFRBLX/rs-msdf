@@ -1,7 +1,7 @@
 use rayon::prelude::*;
 
 use crate::error::{Error, Result};
-use crate::geometry::{Contour, Point, Segment, Shape, SignedDistance};
+use crate::geometry::{BoundsBuilder, Contour, Point, Segment, Shape, SignedDistance};
 use crate::metadata::Bounds;
 use crate::{DistanceFieldMode, MsdfOptions};
 
@@ -44,19 +44,28 @@ pub(crate) fn render_msdf(shape: &Shape, options: MsdfOptions) -> Result<Rasteri
     let width = options.width as usize;
     let height = options.height as usize;
     let pixel_count = width * height;
+    let prepared = PreparedShape::new(shape);
     let mut values = vec![0.0_f64; pixel_count * channels];
+    let mut fills = vec![false; pixel_count];
     let range = DistanceRange::symmetric(options.range_px);
 
     values
         .par_chunks_mut(channels)
+        .zip(fills.par_iter_mut())
         .enumerate()
-        .for_each(|(index, pixel)| {
+        .for_each(|(index, (pixel, fill))| {
             let x = index as u32 % options.width;
             let y = index as u32 / options.width;
             let texture_point = Point::new(f64::from(x) + 0.5, f64::from(y) + 0.5);
             let shape_point = projection.unproject(texture_point);
-            let distance =
-                shape_distance(shape, shape_point, options.mode, options.overlap_support);
+            *fill = shape.contains(shape_point);
+            let distance = shape_distance(
+                &prepared,
+                shape_point,
+                *fill,
+                options.mode,
+                options.overlap_support,
+            );
 
             match options.mode {
                 DistanceFieldMode::Sdf => {
@@ -80,15 +89,7 @@ pub(crate) fn render_msdf(shape: &Shape, options: MsdfOptions) -> Result<Rasteri
         });
 
     if options.scanline_sign_correction {
-        correct_distance_signs(
-            &mut values,
-            width,
-            height,
-            channels,
-            options.mode,
-            shape,
-            projection,
-        );
+        correct_distance_signs(&mut values, &fills, channels, options.mode);
     }
 
     if channels >= 3 && options.error_correction.enabled() {
@@ -181,13 +182,101 @@ impl DistanceSet {
     }
 }
 
+struct PreparedShape<'a> {
+    contours: Vec<PreparedContour<'a>>,
+}
+
+impl<'a> PreparedShape<'a> {
+    fn new(shape: &'a Shape) -> Self {
+        Self {
+            contours: shape.contours.iter().map(PreparedContour::new).collect(),
+        }
+    }
+}
+
+struct PreparedContour<'a> {
+    contour: &'a Contour,
+    winding: i32,
+    boundary_edges: Vec<PreparedEdge>,
+    is_boundary: bool,
+}
+
+impl<'a> PreparedContour<'a> {
+    fn new(contour: &'a Contour) -> Self {
+        let boundary_indices: Vec<_> = contour
+            .segments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, segment)| segment.is_boundary().then_some(index))
+            .collect();
+        let edge_count = boundary_indices.len();
+        let boundary_edges = (0..edge_count)
+            .map(|boundary_index| {
+                let index = boundary_indices[boundary_index];
+                PreparedEdge {
+                    index,
+                    prev_index: boundary_indices[(boundary_index + edge_count - 1) % edge_count],
+                    next_index: boundary_indices[(boundary_index + 1) % edge_count],
+                    bounds: segment_bounds(&contour.segments[index]),
+                }
+            })
+            .collect();
+
+        Self {
+            contour,
+            winding: contour.winding(),
+            boundary_edges,
+            is_boundary: contour.is_boundary,
+        }
+    }
+}
+
+struct PreparedEdge {
+    index: usize,
+    prev_index: usize,
+    next_index: usize,
+    bounds: Bounds,
+}
+
+impl PreparedEdge {
+    fn lower_bound_distance(&self, p: Point) -> f64 {
+        let dx = if p.x < self.bounds.min_x {
+            self.bounds.min_x - p.x
+        } else if p.x > self.bounds.max_x {
+            p.x - self.bounds.max_x
+        } else {
+            0.0
+        };
+        let dy = if p.y < self.bounds.min_y {
+            self.bounds.min_y - p.y
+        } else if p.y > self.bounds.max_y {
+            p.y - self.bounds.max_y
+        } else {
+            0.0
+        };
+        (dx * dx + dy * dy).sqrt()
+    }
+}
+
+fn segment_bounds(segment: &Segment) -> Bounds {
+    let mut builder = BoundsBuilder::default();
+    segment.add_bounds(&mut builder);
+    builder.finish().unwrap_or(Bounds {
+        min_x: 0.0,
+        min_y: 0.0,
+        max_x: 0.0,
+        max_y: 0.0,
+    })
+}
+
 fn shape_distance(
-    shape: &Shape,
+    shape: &PreparedShape<'_>,
     p: Point,
+    fill: bool,
     mode: DistanceFieldMode,
     overlap_support: bool,
 ) -> DistanceSet {
-    let shape_sign = if shape.contains(p) { 1.0 } else { -1.0 };
+    let shape_sign = if fill { 1.0 } else { -1.0 };
     let mut contour_distances = Vec::with_capacity(shape.contours.len());
     let mut shape_distance = None;
     let mut inner_distance = None;
@@ -197,12 +286,12 @@ fn shape_distance(
         if !contour.is_boundary {
             continue;
         }
-        if !contour.segments.iter().any(Segment::is_boundary) {
+        if contour.boundary_edges.is_empty() {
             continue;
         }
 
-        let winding = contour.winding();
-        let distance = contour_distance(contour, p, winding);
+        let winding = contour.winding;
+        let distance = contour_distance(contour, p, mode);
         let scalar = distance.scalar(mode);
         merge_distance(&mut shape_distance, distance, scalar);
 
@@ -290,11 +379,15 @@ fn refine_overlapping_distance(
     selected
 }
 
-fn contour_distance(contour: &Contour, p: Point, winding: i32) -> DistanceSet {
-    let contour_sign = if contour.contains(p) {
-        f64::from(winding)
+fn contour_distance(
+    contour: &PreparedContour<'_>,
+    p: Point,
+    mode: DistanceFieldMode,
+) -> DistanceSet {
+    let contour_sign = if contour.contour.contains(p) {
+        f64::from(contour.winding)
     } else {
-        -f64::from(winding)
+        -f64::from(contour.winding)
     };
 
     let mut true_selector = ClosestSelector::default();
@@ -305,20 +398,16 @@ fn contour_distance(contour: &Contour, p: Point, winding: i32) -> DistanceSet {
         PerpendicularSelector::default(),
     ];
 
-    let boundary_indices: Vec<_> = contour
-        .segments
-        .iter()
-        .enumerate()
-        .filter_map(|(index, segment)| segment.is_boundary().then_some(index))
-        .collect();
-    let edge_count = boundary_indices.len();
-    for boundary_index in 0..edge_count {
-        let index = boundary_indices[boundary_index];
-        let prev_index = boundary_indices[(boundary_index + edge_count - 1) % edge_count];
-        let next_index = boundary_indices[(boundary_index + 1) % edge_count];
-        let edge = &contour.segments[index];
-        let prev = &contour.segments[prev_index];
-        let next = &contour.segments[next_index];
+    for prepared_edge in &contour.boundary_edges {
+        if mode == DistanceFieldMode::Sdf
+            && prepared_edge.lower_bound_distance(p) > true_selector.best_abs()
+        {
+            continue;
+        }
+
+        let edge = &contour.contour.segments[prepared_edge.index];
+        let prev = &contour.contour.segments[prepared_edge.prev_index];
+        let next = &contour.contour.segments[prepared_edge.next_index];
         let (distance, param) = edge.signed_distance_to(p, contour_sign);
         let distance =
             SignedDistance::new(align_sign(distance.distance, contour_sign), distance.dot);
@@ -329,17 +418,24 @@ fn contour_distance(contour: &Contour, p: Point, winding: i32) -> DistanceSet {
         };
 
         true_selector.add(sample);
-        pseudo_selector.add(sample, prev, next, p);
 
-        let color = edge.color();
-        if color.has_red() {
-            multi_selectors[0].add(sample, prev, next, p);
-        }
-        if color.has_green() {
-            multi_selectors[1].add(sample, prev, next, p);
-        }
-        if color.has_blue() {
-            multi_selectors[2].add(sample, prev, next, p);
+        match mode {
+            DistanceFieldMode::Sdf => {}
+            DistanceFieldMode::Psdf => {
+                pseudo_selector.add(sample, prev, next, p);
+            }
+            DistanceFieldMode::Msdf | DistanceFieldMode::Mtsdf => {
+                let color = edge.color();
+                if color.has_red() {
+                    multi_selectors[0].add(sample, prev, next, p);
+                }
+                if color.has_green() {
+                    multi_selectors[1].add(sample, prev, next, p);
+                }
+                if color.has_blue() {
+                    multi_selectors[2].add(sample, prev, next, p);
+                }
+            }
         }
     }
 
@@ -347,8 +443,16 @@ fn contour_distance(contour: &Contour, p: Point, winding: i32) -> DistanceSet {
         .best
         .map(|sample| sample.distance.distance)
         .unwrap_or(0.0);
-    let pseudo_distance = pseudo_selector.distance(p);
-    let mut multi = multi_selectors.map(|selector| selector.distance(p));
+    let pseudo_distance = if mode == DistanceFieldMode::Psdf {
+        pseudo_selector.distance(p)
+    } else {
+        0.0
+    };
+    let mut multi = if matches!(mode, DistanceFieldMode::Msdf | DistanceFieldMode::Mtsdf) {
+        multi_selectors.map(|selector| selector.distance(p))
+    } else {
+        [0.0; 3]
+    };
 
     if median(multi).signum() != contour_sign.signum() {
         multi.iter_mut().for_each(|distance| *distance = -*distance);
@@ -381,6 +485,12 @@ impl<'a> ClosestSelector<'a> {
         {
             self.best = Some(sample);
         }
+    }
+
+    fn best_abs(self) -> f64 {
+        self.best
+            .map(|sample| sample.distance.distance.abs())
+            .unwrap_or(f64::INFINITY)
     }
 }
 
@@ -495,30 +605,23 @@ fn encode_value(value: f64) -> u8 {
 
 fn correct_distance_signs(
     values: &mut [f64],
-    width: usize,
-    height: usize,
+    fills: &[bool],
     channels: usize,
     mode: DistanceFieldMode,
-    shape: &Shape,
-    projection: Projection,
 ) {
-    for y in 0..height {
-        for x in 0..width {
-            let shape_point = projection.unproject(Point::new(x as f64 + 0.5, y as f64 + 0.5));
-            let fill = shape.contains(shape_point);
-            let offset = (y * width + x) * channels;
+    for (index, &fill) in fills.iter().enumerate() {
+        let offset = index * channels;
 
-            match mode {
-                DistanceFieldMode::Sdf | DistanceFieldMode::Psdf => {
-                    correct_scalar_sign(&mut values[offset], fill);
-                }
-                DistanceFieldMode::Msdf => {
-                    correct_multi_sign(&mut values[offset..offset + 3], fill);
-                }
-                DistanceFieldMode::Mtsdf => {
-                    correct_multi_sign(&mut values[offset..offset + 3], fill);
-                    correct_scalar_sign(&mut values[offset + 3], fill);
-                }
+        match mode {
+            DistanceFieldMode::Sdf | DistanceFieldMode::Psdf => {
+                correct_scalar_sign(&mut values[offset], fill);
+            }
+            DistanceFieldMode::Msdf => {
+                correct_multi_sign(&mut values[offset..offset + 3], fill);
+            }
+            DistanceFieldMode::Mtsdf => {
+                correct_multi_sign(&mut values[offset..offset + 3], fill);
+                correct_scalar_sign(&mut values[offset + 3], fill);
             }
         }
     }

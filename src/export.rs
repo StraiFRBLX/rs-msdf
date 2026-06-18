@@ -29,6 +29,12 @@ pub struct MsdfJsonExport {
 impl MsdfJsonExport {
     pub fn from_output(output: &MsdfOutput) -> Result<Self> {
         let png = encode_png(output)?;
+        let png_base64_capacity = base64::encoded_len(png.len(), true).ok_or_else(|| {
+            Error::InvalidOptions("encoded PNG is too large for JSON export".to_string())
+        })?;
+        let mut png_base64 = String::with_capacity(png_base64_capacity);
+        base64::engine::general_purpose::STANDARD.encode_string(png, &mut png_base64);
+
         Ok(Self {
             kind: "rs-msdf",
             version: 3,
@@ -43,7 +49,7 @@ impl MsdfJsonExport {
             geometry_bounds: output.metadata.geometry_bounds,
             scale: output.metadata.scale,
             translation: output.metadata.translation,
-            png_base64: base64::engine::general_purpose::STANDARD.encode(png),
+            png_base64,
         })
     }
 }
@@ -86,7 +92,9 @@ pub fn write_metadata_json_file(
 }
 
 pub fn write_json_export_file(path: impl AsRef<Path>, export: &MsdfJsonExport) -> Result<()> {
-    std::fs::write(path, serde_json::to_vec(export)?)?;
+    let file = File::create(path)?;
+    let writer = BufWriter::new(file);
+    serde_json::to_writer(writer, export)?;
     Ok(())
 }
 

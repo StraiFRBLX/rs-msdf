@@ -14,6 +14,10 @@ path = "src/lib.rs"
 name = "rs-msdf"
 path = "src/main.rs"
 
+[[bench]]
+name = "generation"
+harness = false
+
 [dependencies]
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
