@@ -197,7 +197,7 @@ fn shape_distance(
         if !contour.is_boundary {
             continue;
         }
-        if contour.segments.is_empty() {
+        if !contour.segments.iter().any(Segment::is_boundary) {
             continue;
         }
 
@@ -305,11 +305,20 @@ fn contour_distance(contour: &Contour, p: Point, winding: i32) -> DistanceSet {
         PerpendicularSelector::default(),
     ];
 
-    let edge_count = contour.segments.len();
-    for index in 0..edge_count {
+    let boundary_indices: Vec<_> = contour
+        .segments
+        .iter()
+        .enumerate()
+        .filter_map(|(index, segment)| segment.is_boundary().then_some(index))
+        .collect();
+    let edge_count = boundary_indices.len();
+    for boundary_index in 0..edge_count {
+        let index = boundary_indices[boundary_index];
+        let prev_index = boundary_indices[(boundary_index + edge_count - 1) % edge_count];
+        let next_index = boundary_indices[(boundary_index + 1) % edge_count];
         let edge = &contour.segments[index];
-        let prev = &contour.segments[(index + edge_count - 1) % edge_count];
-        let next = &contour.segments[(index + 1) % edge_count];
+        let prev = &contour.segments[prev_index];
+        let next = &contour.segments[next_index];
         let (distance, param) = edge.signed_distance_to(p, contour_sign);
         let distance =
             SignedDistance::new(align_sign(distance.distance, contour_sign), distance.dot);
@@ -565,6 +574,9 @@ fn protect_corners(
         for index in 0..edge_count {
             let prev = &contour.segments[(index + edge_count - 1) % edge_count];
             let edge = &contour.segments[index];
+            if !edge.is_boundary() {
+                continue;
+            }
             let common_color = prev.color().bits() & edge.color().bits();
             if common_color & common_color.saturating_sub(1) == 0 {
                 let p = projection.project(edge.start());

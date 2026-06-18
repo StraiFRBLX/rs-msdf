@@ -189,8 +189,8 @@ fn collect_same_paint_fill_and_stroke(
         &mut fill_contours,
     )?;
 
-    let stroke_path = path
-        .data()
+    let stroke_input = close_coincident_subpaths(path.data());
+    let stroke_path = stroke_input
         .stroke(&stroke.to_tiny_skia(), 1.0)
         .ok_or_else(|| {
             Error::UnsupportedSvg(
@@ -201,7 +201,7 @@ fn collect_same_paint_fill_and_stroke(
     collect_path_data(
         &stroke_path,
         path.abs_transform(),
-        FillRule::NonZero,
+        FillRule::EvenOdd,
         true,
         &mut stroke_contours,
     )?;
@@ -209,20 +209,106 @@ fn collect_same_paint_fill_and_stroke(
     let fill_shape = Shape {
         contours: fill_contours.clone(),
     };
-    for contour in &mut stroke_contours {
-        if contour
-            .segments
-            .iter()
-            .all(|segment| fill_shape.contains(segment.point_at(0.5)))
-        {
-            contour.is_boundary = false;
+    let stroke_shape = Shape {
+        contours: stroke_contours.clone(),
+    };
+
+    for contour in fill_contours.iter_mut().chain(stroke_contours.iter_mut()) {
+        for segment in &mut contour.segments {
+            if !separates_same_paint_region(&fill_shape, &stroke_shape, segment) {
+                segment.set_boundary(false);
+            }
         }
+        contour.is_boundary = contour.segments.iter().any(Segment::is_boundary);
     }
 
     contours.extend(fill_contours);
     contours.extend(stroke_contours);
 
     Ok(())
+}
+
+fn close_coincident_subpaths(path: &tiny_skia_path::Path) -> tiny_skia_path::Path {
+    let mut builder = tiny_skia_path::PathBuilder::new();
+    let mut start = None;
+    let mut current = None;
+    let mut closed = false;
+
+    for segment in path.segments() {
+        match segment {
+            tiny_skia_path::PathSegment::MoveTo(p) => {
+                close_if_coincident(&mut builder, start, current, closed);
+                builder.move_to(p.x, p.y);
+                start = Some(p);
+                current = Some(p);
+                closed = false;
+            }
+            tiny_skia_path::PathSegment::LineTo(p) => {
+                builder.line_to(p.x, p.y);
+                current = Some(p);
+                closed = false;
+            }
+            tiny_skia_path::PathSegment::QuadTo(p1, p2) => {
+                builder.quad_to(p1.x, p1.y, p2.x, p2.y);
+                current = Some(p2);
+                closed = false;
+            }
+            tiny_skia_path::PathSegment::CubicTo(p1, p2, p3) => {
+                builder.cubic_to(p1.x, p1.y, p2.x, p2.y, p3.x, p3.y);
+                current = Some(p3);
+                closed = false;
+            }
+            tiny_skia_path::PathSegment::Close => {
+                builder.close();
+                current = start;
+                closed = true;
+            }
+        }
+    }
+
+    close_if_coincident(&mut builder, start, current, closed);
+    builder.finish().unwrap_or_else(|| path.clone())
+}
+
+fn close_if_coincident(
+    builder: &mut tiny_skia_path::PathBuilder,
+    start: Option<tiny_skia_path::Point>,
+    current: Option<tiny_skia_path::Point>,
+    closed: bool,
+) {
+    let (Some(start), Some(current)) = (start, current) else {
+        return;
+    };
+    if !closed && same_point(start, current) {
+        builder.close();
+    }
+}
+
+fn same_point(a: tiny_skia_path::Point, b: tiny_skia_path::Point) -> bool {
+    (a.x - b.x).abs() <= 1.0e-5 && (a.y - b.y).abs() <= 1.0e-5
+}
+
+fn separates_same_paint_region(
+    fill_shape: &Shape,
+    stroke_shape: &Shape,
+    segment: &Segment,
+) -> bool {
+    let midpoint = segment.point_at(0.5);
+    let tangent = segment.tangent_at(0.5).normalize();
+    if tangent.x == 0.0 && tangent.y == 0.0 {
+        return true;
+    }
+
+    let normal = Point::new(-tangent.y, tangent.x);
+    let epsilon = 1.0e-2;
+    let left = midpoint.add(normal.scale(epsilon));
+    let right = midpoint.sub(normal.scale(epsilon));
+    same_paint_contains(fill_shape, stroke_shape, left)
+        != same_paint_contains(fill_shape, stroke_shape, right)
+}
+
+fn same_paint_contains(fill_shape: &Shape, stroke_shape: &Shape, point: Point) -> bool {
+    fill_shape.contains(point) || stroke_shape.contains(point)
 }
 
 fn collect_path_data(
@@ -254,6 +340,7 @@ fn collect_path_data(
                         p0,
                         p1,
                         color: EdgeColor::WHITE,
+                        is_boundary,
                     });
                 }
                 current = Some(p1);
@@ -269,6 +356,7 @@ fn collect_path_data(
                     p1,
                     p2,
                     color: EdgeColor::WHITE,
+                    is_boundary,
                 });
                 current = Some(p2);
             }
@@ -285,6 +373,7 @@ fn collect_path_data(
                     p2,
                     p3,
                     color: EdgeColor::WHITE,
+                    is_boundary,
                 });
                 current = Some(p3);
             }
@@ -296,6 +385,7 @@ fn collect_path_data(
                         p0,
                         p1,
                         color: EdgeColor::WHITE,
+                        is_boundary,
                     });
                 }
                 current = start;

@@ -372,6 +372,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn same_paint_home_icon_has_no_fill_stroke_seam() {
+        let output = generate_from_svg(
+            include_bytes!("../tests/fixtures/home-same-fill-stroke.svg"),
+            MsdfOptions::new(96, 96, 4.0).unwrap(),
+        )
+        .unwrap();
+
+        let alpha = sample_texture_median_alpha(&output, 80, 83);
+        assert!(
+            alpha > 240,
+            "expected lower-right fill/stroke seam to decode as solid body, got {alpha}"
+        );
+    }
+
     fn sample_svg_point(output: &MsdfOutput, x: f64, y: f64, channel: usize) -> u8 {
         let tx = (x * output.metadata.scale + output.metadata.translation[0]).round();
         let ty = (y * output.metadata.scale + output.metadata.translation[1]).round();
@@ -379,5 +394,16 @@ mod tests {
         let ty = ty.clamp(0.0, f64::from(output.height - 1)) as usize;
         let offset = (ty * output.width as usize + tx) * output.channels + channel;
         output.pixels[offset]
+    }
+
+    fn sample_texture_median_alpha(output: &MsdfOutput, x: usize, y: usize) -> u8 {
+        let offset = (y * output.width as usize + x) * output.channels;
+        let mut channels = [
+            output.pixels[offset],
+            output.pixels[offset + 1],
+            output.pixels[offset + 2],
+        ];
+        channels.sort_unstable();
+        channels[1]
     }
 }

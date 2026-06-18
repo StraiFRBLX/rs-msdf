@@ -127,12 +127,14 @@ pub(crate) enum Segment {
         p0: Point,
         p1: Point,
         color: EdgeColor,
+        is_boundary: bool,
     },
     Quad {
         p0: Point,
         p1: Point,
         p2: Point,
         color: EdgeColor,
+        is_boundary: bool,
     },
     Cubic {
         p0: Point,
@@ -140,6 +142,7 @@ pub(crate) enum Segment {
         p2: Point,
         p3: Point,
         color: EdgeColor,
+        is_boundary: bool,
     },
 }
 
@@ -155,6 +158,22 @@ impl Segment {
             Segment::Line { color, .. }
             | Segment::Quad { color, .. }
             | Segment::Cubic { color, .. } => *color,
+        }
+    }
+
+    pub(crate) fn is_boundary(&self) -> bool {
+        match self {
+            Segment::Line { is_boundary, .. }
+            | Segment::Quad { is_boundary, .. }
+            | Segment::Cubic { is_boundary, .. } => *is_boundary,
+        }
+    }
+
+    pub(crate) fn set_boundary(&mut self, boundary: bool) {
+        match self {
+            Segment::Line { is_boundary, .. }
+            | Segment::Quad { is_boundary, .. }
+            | Segment::Cubic { is_boundary, .. } => *is_boundary = boundary,
         }
     }
 
@@ -258,16 +277,29 @@ impl Segment {
     #[allow(dead_code)]
     fn reversed(&self) -> Self {
         match *self {
-            Segment::Line { p0, p1, color } => Segment::Line {
+            Segment::Line {
+                p0,
+                p1,
+                color,
+                is_boundary,
+            } => Segment::Line {
                 p0: p1,
                 p1: p0,
                 color,
+                is_boundary,
             },
-            Segment::Quad { p0, p1, p2, color } => Segment::Quad {
+            Segment::Quad {
+                p0,
+                p1,
+                p2,
+                color,
+                is_boundary,
+            } => Segment::Quad {
                 p0: p2,
                 p1,
                 p2: p0,
                 color,
+                is_boundary,
             },
             Segment::Cubic {
                 p0,
@@ -275,12 +307,14 @@ impl Segment {
                 p2,
                 p3,
                 color,
+                is_boundary,
             } => Segment::Cubic {
                 p0: p3,
                 p1: p2,
                 p2: p1,
                 p3: p0,
                 color,
+                is_boundary,
             },
         }
     }
@@ -296,12 +330,17 @@ impl Segment {
 
     fn split_range(&self, start: f64, end: f64) -> Self {
         match *self {
-            Segment::Line { color, .. } => Segment::Line {
+            Segment::Line {
+                color, is_boundary, ..
+            } => Segment::Line {
                 p0: self.point_at(start),
                 p1: self.point_at(end),
                 color,
+                is_boundary,
             },
-            Segment::Quad { color, .. } => {
+            Segment::Quad {
+                color, is_boundary, ..
+            } => {
                 let p0 = self.point_at(start);
                 let p2 = self.point_at(end);
                 let midpoint_t = (start + end) * 0.5;
@@ -314,9 +353,12 @@ impl Segment {
                     ),
                     p2,
                     color,
+                    is_boundary,
                 }
             }
-            Segment::Cubic { color, .. } => {
+            Segment::Cubic {
+                color, is_boundary, ..
+            } => {
                 let p0 = self.point_at(start);
                 let p3 = self.point_at(end);
                 let span = end - start;
@@ -328,6 +370,7 @@ impl Segment {
                     p2: Point::new(p3.x - t1.x * span / 3.0, p3.y - t1.y * span / 3.0),
                     p3,
                     color,
+                    is_boundary,
                 }
             }
         }
@@ -1039,6 +1082,7 @@ mod tests {
             p0: Point::new(0.0, 0.0),
             p1: Point::new(10.0, 0.0),
             color: EdgeColor::RED,
+            is_boundary: true,
         };
 
         assert!(
@@ -1073,21 +1117,25 @@ mod tests {
                     p0: Point::new(0.0, 0.0),
                     p1: Point::new(10.0, 0.0),
                     color: EdgeColor::RED,
+                    is_boundary: true,
                 },
                 Segment::Line {
                     p0: Point::new(10.0, 0.0),
                     p1: Point::new(10.0, 10.0),
                     color: EdgeColor::GREEN,
+                    is_boundary: true,
                 },
                 Segment::Line {
                     p0: Point::new(10.0, 10.0),
                     p1: Point::new(0.0, 10.0),
                     color: EdgeColor::BLUE,
+                    is_boundary: true,
                 },
                 Segment::Line {
                     p0: Point::new(0.0, 10.0),
                     p1: Point::new(0.0, 0.0),
                     color: EdgeColor::RED,
+                    is_boundary: true,
                 },
             ],
         };
@@ -1107,21 +1155,25 @@ mod tests {
                         p0: Point::new(0.0, 0.0),
                         p1: Point::new(10.0, 0.0),
                         color: EdgeColor::WHITE,
+                        is_boundary: true,
                     },
                     Segment::Line {
                         p0: Point::new(10.0, 0.0),
                         p1: Point::new(10.0, 10.0),
                         color: EdgeColor::WHITE,
+                        is_boundary: true,
                     },
                     Segment::Line {
                         p0: Point::new(10.0, 10.0),
                         p1: Point::new(0.0, 10.0),
                         color: EdgeColor::WHITE,
+                        is_boundary: true,
                     },
                     Segment::Line {
                         p0: Point::new(0.0, 10.0),
                         p1: Point::new(0.0, 0.0),
                         color: EdgeColor::WHITE,
+                        is_boundary: true,
                     },
                 ],
             }],
@@ -1145,6 +1197,7 @@ mod tests {
             p0: Point::new(0.0, 0.0),
             p1: Point::new(10.0, 0.0),
             color: EdgeColor::WHITE,
+            is_boundary: true,
         };
 
         let above = line
