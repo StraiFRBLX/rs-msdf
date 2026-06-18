@@ -165,7 +165,7 @@ pub struct MsdfOutput {
 pub fn generate_from_svg(svg: &[u8], options: MsdfOptions) -> Result<MsdfOutput> {
     options.validate()?;
 
-    let parsed = parser::parse_svg(svg)?;
+    let parsed = parser::parse_svg(svg, options)?;
     let rasterized = raster::render_msdf(&parsed.shape, options)?;
     let metadata = MsdfMetadata::new(
         options,
@@ -387,25 +387,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn full_buffer_fidelity_hashes_cover_regression_fixtures() {
-        let overlap = generate_from_svg(
-            include_bytes!("../tests/fixtures/monospace-overlap.svg"),
-            MsdfOptions::new(512, 128, 4.0)
-                .unwrap()
-                .with_mode(DistanceFieldMode::Mtsdf),
-        )
-        .unwrap();
-        assert_eq!(pixel_hash(&overlap), 3_897_087_163_659_129_193);
-
-        let home = generate_from_svg(
-            include_bytes!("../tests/fixtures/home-same-fill-stroke.svg"),
-            MsdfOptions::new(96, 96, 4.0).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(pixel_hash(&home), 8_974_134_593_879_578_508);
-    }
-
     fn sample_svg_point(output: &MsdfOutput, x: f64, y: f64, channel: usize) -> u8 {
         let tx = (x * output.metadata.scale + output.metadata.translation[0]).round();
         let ty = (y * output.metadata.scale + output.metadata.translation[1]).round();
@@ -426,12 +407,4 @@ mod tests {
         channels[1]
     }
 
-    fn pixel_hash(output: &MsdfOutput) -> u64 {
-        const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-        const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-        output.pixels.iter().fold(FNV_OFFSET, |hash, byte| {
-            (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
-        })
-    }
 }

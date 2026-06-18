@@ -116,12 +116,14 @@ impl EdgeColor {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 pub(crate) enum FillRule {
     NonZero,
     EvenOdd,
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub(crate) enum Segment {
     Line {
         p0: Point,
@@ -169,6 +171,7 @@ impl Segment {
         }
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_boundary(&mut self, boundary: bool) {
         match self {
             Segment::Line { is_boundary, .. }
